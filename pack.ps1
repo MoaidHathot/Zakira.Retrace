@@ -33,7 +33,10 @@
     Default: artifacts.
 
 .PARAMETER Source
-    NuGet source URL to push to. Default: https://api.nuget.org/v3/index.json.
+    NuGet source to push to. Defaults to nuget.org's package endpoint rather than its
+    v3 service index, because `api.nuget.org` is blocked at the TLS layer on some
+    networks this is run from while `www.nuget.org` is reachable. The endpoint is a
+    valid push target everywhere, so this costs nothing on an unrestricted network.
 
 .PARAMETER SkipDuplicate
     Pass --skip-duplicate to `dotnet nuget push`. Default: $true (re-runs do not fail
@@ -63,7 +66,7 @@ param(
     [switch] $Push,
     [string] $Configuration = 'Release',
     [string] $Output = 'artifacts',
-    [string] $Source = 'https://api.nuget.org/v3/index.json',
+    [string] $Source = 'https://www.nuget.org/api/v2/package',
     [bool]   $SkipDuplicate = $true,
     [switch] $LocalFeed,
     [string] $LocalFeedPath = 'C:\nuget\local-feed'
