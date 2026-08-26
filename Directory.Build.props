@@ -1,0 +1,65 @@
+<Project>
+
+  <!--
+    Repo-wide MSBuild defaults for Zakira.Retrace.
+    Project-specific metadata (PackageId, Description, PackAsTool, ToolCommandName,
+    RootNamespace, AssemblyName, OutputType) stays in each leaf csproj.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <!--
+      Nothing is packable by default. Only src/Zakira.Retrace opts back in: every library
+      in this repo ships *inside* that single dotnet-tool package rather than as its own
+      NuGet package, so `dnx Zakira.Retrace` pulls one artifact and gets every source.
+    -->
+    <IsPackable>false</IsPackable>
+    <!--
+      CS1591 : missing XML docs on public members.
+      CA1848 / CA1873 : prefer source-generated LoggerMessage delegates over direct ILogger calls.
+                        Skipped for a CLI tool of this size; logging is not on a hot path.
+      CA1031 : catching System.Exception. Session stores are third-party files that can be
+               malformed or half-written; a bad session must never take down a whole listing.
+      CA1002 / CA2227 : List<T> / settable collection properties on the config POCOs, which
+                        System.Text.Json needs to populate.
+      CA1812 : internal classes only instantiated through DI.
+    -->
+    <NoWarn>$(NoWarn);CS1591;CA1848;CA1873;CA1031;CA1002;CA2227;CA1812</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Versioning">
+    <!--
+      Single source of truth for the version stamped on the produced NuGet package,
+      assembly, and file. To cut a release, edit this number, commit, push, then run
+      ./pack.ps1 (or ./pack.ps1 -Push). The release script intentionally does NOT expose
+      a -Version override: the only way to change what ships is to change this file.
+    -->
+    <VersionPrefix>0.1.0</VersionPrefix>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Repository metadata">
+    <Authors>Moaid Hathot</Authors>
+    <Company>Zakira</Company>
+    <Product>Zakira.Retrace</Product>
+    <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
+    <PackageLicenseExpression>Unlicense</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/MoaidHathot/Zakira.Retrace</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MoaidHathot/Zakira.Retrace</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.Sources.OpenCode</RootNamespace>
+    <AssemblyName>Zakira.Retrace.Sources.OpenCode</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Zakira.Retrace.Abstractions\Zakira.Retrace.Abstractions.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Core\Zakira.Retrace.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Zakira.Retrace.Sources.UnitTests" />
+  </ItemGroup>
+
+</Project>

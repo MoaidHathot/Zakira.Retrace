@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.Core.UnitTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Abstractions\Zakira.Retrace.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Core\Zakira.Retrace.Core.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace\Zakira.Retrace.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,104 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Zakira.Retrace</RootNamespace>
+    <!--
+      The assembly is named after the command so that `retrace` help output and the
+      process name a user sees in Task Manager / `ps` agree with the tool command name.
+    -->
+    <AssemblyName>retrace</AssemblyName>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Packaging">
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>retrace</ToolCommandName>
+    <PackageId>Zakira.Retrace</PackageId>
+    <Description>Search, read, and resume AI coding sessions across harnesses. Indexes OpenCode, GitHub Copilot CLI, and Copilot in VS Code into one local hybrid (BM25 + local ONNX embeddings) search index. Ships as both a CLI (`retrace`) and an MCP server (`retrace mcp serve`) in one .NET 10 binary.</Description>
+    <PackageTags>ai;agent;sessions;search;mcp;cli;dotnet-tool;opencode;copilot;zakira</PackageTags>
+    <PackageReleaseNotes>0.1.0 — first release. Sources: OpenCode, Copilot CLI, Copilot VS Code. Hybrid FTS5 + ONNX embedding search, incremental indexing, CLI and MCP server.</PackageReleaseNotes>
+    <!--
+      LatestMajor lets the tool run on a newer runtime than it was built against, which is
+      what makes `dnx Zakira.Retrace ...` work on a machine that only has a later SDK.
+    -->
+    <RollForward>LatestMajor</RollForward>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Zakira.Retrace.Abstractions\Zakira.Retrace.Abstractions.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Core\Zakira.Retrace.Core.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Sources.OpenCode\Zakira.Retrace.Sources.OpenCode.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Sources.CopilotCli\Zakira.Retrace.Sources.CopilotCli.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Sources.CopilotVsCode\Zakira.Retrace.Sources.CopilotVsCode.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <PackageReference Include="ModelContextProtocol" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Zakira.Retrace.Core.UnitTests" />
+    <InternalsVisibleTo Include="Zakira.Retrace.E2ETests" />
+  </ItemGroup>
+
+  <ItemGroup Label="Package payload">
+    <None Include="..\..\schemas\*.schema.json" Pack="true" PackagePath="schemas\" />
+    <None Include="..\..\skills\zakira-retrace\**\*" Pack="true" PackagePath="skills\zakira-retrace\" />
+  </ItemGroup>
+
+  <!--
+    Microsoft.ML.OnnxRuntime ships native binaries for every platform it supports, including
+    Android (41 MB) and iOS (49 MB), and SQLitePCLRaw fans out to a further ~20 runtime
+    identifiers. A .NET global tool is invoked from a shell on a desktop or a server, so most of
+    that payload can never be loaded — it just makes `dotnet tool install` and `dnx` slower for
+    everyone.
+
+    `dotnet pack` for a PackAsTool project does not expose the payload as MSBuild items; the pack
+    task walks $(PublishDir) directly. So the trimming has to happen on disk, and the timing is
+    narrow: after the publish output has been written, but before PackToolImplementation
+    enumerates it. Running any later (for example before GenerateNuspec) makes pack fail on the
+    files it has already recorded but can no longer find.
+
+    PackToolImplementation only runs while packing a tool, so a plain `dotnet publish` for local
+    use is left with the full set of runtimes.
+
+    Keep list: the RIDs a person can actually run a CLI tool on. Removing this target is safe; it
+    only affects package size.
+  -->
+  <PropertyGroup>
+    <RetracePackagedRuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;linux-musl-x64;linux-musl-arm64;osx-x64;osx-arm64</RetracePackagedRuntimeIdentifiers>
+  </PropertyGroup>
+
+  <Target Name="TrimUnusedRuntimeAssets" BeforeTargets="PackToolImplementation" Condition="'$(IsPackable)' == 'true'">
+    <PropertyGroup>
+      <_RetraceRuntimesRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(PublishDir)runtimes'))</_RetraceRuntimesRoot>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(_RetraceRuntimesRoot)')">
+      <!--
+        Directory.GetDirectories rather than an item glob: an MSBuild wildcard expands to files,
+        never to directories, so `runtimes\*` silently matches nothing and the whole target
+        becomes a no-op.
+      -->
+      <_RetraceRuntimeDirectory Include="$([System.IO.Directory]::GetDirectories('$(_RetraceRuntimesRoot)'))" />
+      <_RetraceRuntimeToDrop
+        Include="@(_RetraceRuntimeDirectory)"
+        Condition="!$([System.String]::Copy(';$(RetracePackagedRuntimeIdentifiers);').Contains(';%(Filename)%(Extension);'))" />
+    </ItemGroup>
+
+    <Message Importance="High"
+             Text="Zakira.Retrace: dropping unusable runtime assets: @(_RetraceRuntimeToDrop->'%(Filename)%(Extension)', ', ')"
+             Condition="'@(_RetraceRuntimeToDrop)' != ''" />
+
+    <RemoveDir Directories="@(_RetraceRuntimeToDrop)" Condition="'@(_RetraceRuntimeToDrop)' != ''" />
+  </Target>
+
+</Project>

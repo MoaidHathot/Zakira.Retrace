@@ -1,0 +1,20 @@
+<Project>
+
+  <ItemGroup Label="Shared package files">
+    <!-- Use a project-local README.md when present; otherwise fall back to the root README. -->
+    <None Include="$(MSBuildThisFileDirectory)README.md"
+          Pack="true" PackagePath="\"
+          Condition="'$(IsPackable)' == 'true' AND !Exists('$(MSBuildProjectDirectory)\README.md')" />
+    <None Include="$(MSBuildProjectDirectory)\README.md"
+          Pack="true" PackagePath="\"
+          Condition="'$(IsPackable)' == 'true' AND Exists('$(MSBuildProjectDirectory)\README.md')" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE"
+          Pack="true" PackagePath="\"
+          Condition="'$(IsPackable)' == 'true'" />
+  </ItemGroup>
+
+  <ItemGroup Label="SourceLink" Condition="'$(IsPackable)' == 'true'">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

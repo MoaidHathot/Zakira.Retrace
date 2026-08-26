@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.Abstractions</RootNamespace>
+    <AssemblyName>Zakira.Retrace.Abstractions</AssemblyName>
+    <!--
+      Zero package references on purpose. Everything here is a contract or a POCO, so a
+      future out-of-repo source implementation only needs to take a dependency on this
+      assembly, not on the whole Core stack.
+    -->
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/solution items/">
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="Directory.Packages.props" />
+    <File Path="global.json" />
+    <File Path="NuGet.config" />
+    <File Path="README.md" />
+    <File Path="pack.ps1" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Zakira.Retrace.Abstractions/Zakira.Retrace.Abstractions.csproj" />
+    <Project Path="src/Zakira.Retrace.Core/Zakira.Retrace.Core.csproj" />
+    <Project Path="src/Zakira.Retrace.Sources.OpenCode/Zakira.Retrace.Sources.OpenCode.csproj" />
+    <Project Path="src/Zakira.Retrace.Sources.CopilotCli/Zakira.Retrace.Sources.CopilotCli.csproj" />
+    <Project Path="src/Zakira.Retrace.Sources.CopilotVsCode/Zakira.Retrace.Sources.CopilotVsCode.csproj" />
+    <Project Path="src/Zakira.Retrace/Zakira.Retrace.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Zakira.Retrace.Core.UnitTests/Zakira.Retrace.Core.UnitTests.csproj" />
+    <Project Path="tests/Zakira.Retrace.Sources.UnitTests/Zakira.Retrace.Sources.UnitTests.csproj" />
+    <Project Path="tests/Zakira.Retrace.E2ETests/Zakira.Retrace.E2ETests.csproj" />
+  </Folder>
+</Solution>

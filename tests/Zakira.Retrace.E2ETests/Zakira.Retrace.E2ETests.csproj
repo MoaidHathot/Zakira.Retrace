@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.E2ETests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      ReferenceOutputAssembly=false: the E2E suite spawns retrace.dll as a subprocess
+      rather than linking against it, but we still want the tool built first and its
+      output path discoverable via the generated RetraceToolPath constant below.
+    -->
+    <ProjectReference Include="..\..\src\Zakira.Retrace\Zakira.Retrace.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Target Name="EmitRetraceToolPath" BeforeTargets="BeforeCompile">
+    <PropertyGroup>
+      <_RetraceToolPath>$(MSBuildThisFileDirectory)..\..\src\Zakira.Retrace\bin\$(Configuration)\$(TargetFramework)\retrace.dll</_RetraceToolPath>
+      <_RetraceToolPathFile>$(IntermediateOutputPath)RetraceToolPath.g.cs</_RetraceToolPathFile>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(_RetraceToolPathFile)"
+      Lines="namespace Zakira.Retrace.E2ETests%3B internal static class RetraceTool { public const string DllPath = @&quot;$([System.IO.Path]::GetFullPath('$(_RetraceToolPath)'))&quot;%3B }"
+      Overwrite="true"
+      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(_RetraceToolPathFile)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/MoaidHathot/Zakira.Retrace/main/schemas/retrace.schema.json",
+  "title": "Zakira.Retrace configuration",
+  "description": "Configuration for the retrace CLI and MCP server. Lives at $XDG_CONFIG_HOME/Zakira.Retrace/retrace.json, or the platform equivalent.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference, for editor completion."
+    },
+    "version": {
+      "type": "integer",
+      "description": "Config format version. Bumped only for breaking layout changes.",
+      "default": 1
+    },
+    "sources": {
+      "type": "object",
+      "description": "Per-source settings, keyed by the source ids used in URIs and CLI filters.",
+      "additionalProperties": false,
+      "properties": {
+        "opencode": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "dataDirectory": {
+              "type": ["string", "null"],
+              "default": null,
+              "description": "Override OpenCode's data directory. null auto-detects. Supports $XDG_CONFIG_HOME, ~, and environment variables."
+            },
+            "preferLegacyJsonStore": {
+              "type": "boolean",
+              "default": false,
+              "description": "Read the legacy JSON tree under storage/ instead of opencode.db. The database is authoritative and far faster; this exists for installs where it is missing or unreadable."
+            },
+            "includeChildSessions": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include sub-agent and forked child sessions in listings."
+            }
+          }
+        },
+        "copilot-cli": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "dataDirectory": { "type": ["string", "null"], "default": null },
+            "minTurns": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 1,
+              "description": "Hide sessions with fewer than this many turns. Copilot CLI writes a row on every launch, so a busy machine accumulates thousands of empty shells."
+            },
+            "useNativeSearchIndex": {
+              "type": "boolean",
+              "default": true,
+              "description": "Use the harness's own FTS5 index for --live searches instead of scanning turn text."
+            }
+          }
+        },
+        "copilot-vscode": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "dataDirectory": { "type": ["string", "null"], "default": null },
+            "editors": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["stable", "insiders", "exploration"] },
+              "default": ["stable", "insiders"],
+              "description": "Which VS Code installations to scan."
+            },
+            "includeEmptySessions": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include chat sessions that contain no requests."
+            }
+          }
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "description": "Index location and chunking behaviour.",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Full path to the index database. null means <data directory>/index.db."
+        },
+        "autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Top up a stale index inline before a query. Retrace never runs in the background; this happens inside the command that noticed. The top-up is time-boxed and keyword-only, so a query stays fast no matter how far behind the index is."
+        },
+        "autoRefreshMinIntervalMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Skip the staleness check when the index was refreshed less recently than this, so a burst of queries does not re-probe every source."
+        },
+        "autoRefreshMaxSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Hard ceiling on how long an automatic top-up may delay a query. When it expires the query answers from what the index already holds and reports the shortfall. 0 removes the ceiling, which only makes sense in a script that wants a fully current index."
+        },
+        "autoRefreshEmbed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compute vectors during an automatic top-up. Off by default: inference is the most expensive step and does not belong in front of an interactive query. New sessions are still keyword-searchable immediately; their vectors arrive with an explicit `retrace index refresh`."
+        },
+        "includeToolOutput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index tool names, arguments, and captured output for keyword search. Tool output is never embedded regardless."
+        },
+        "includeReasoning": { "type": "boolean", "default": true },
+        "chunkCharacters": { "type": "integer", "minimum": 100, "default": 1200 },
+        "chunkOverlapCharacters": { "type": "integer", "minimum": 0, "default": 150 },
+        "minChunkCharacters": { "type": "integer", "minimum": 1, "default": 16 },
+        "maxToolOutputCharacters": { "type": "integer", "minimum": 0, "default": 4000 }
+      }
+    },
+    "search": {
+      "type": "object",
+      "description": "Retrieval and ranking behaviour.",
+      "additionalProperties": false,
+      "properties": {
+        "defaultTop": { "type": "integer", "minimum": 1, "default": 20 },
+        "snippetsPerSession": { "type": "integer", "minimum": 0, "default": 3 },
+        "mode": {
+          "type": "string",
+          "enum": ["hybrid", "lexical", "semantic"],
+          "default": "hybrid",
+          "description": "Hybrid degrades to lexical automatically when no embedding model is installed."
+        },
+        "rrfK": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "The k constant in reciprocal rank fusion, score = weight / (k + rank)."
+        },
+        "lexicalWeight": { "type": "number", "minimum": 0, "default": 1.0 },
+        "semanticWeight": { "type": "number", "minimum": 0, "default": 1.0 },
+        "recencyBoost": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.15,
+          "description": "How strongly recency lifts a result, as a fraction of its fused score. 0 disables it."
+        },
+        "recencyHalfLifeDays": { "type": "number", "exclusiveMinimum": 0, "default": 30 },
+        "workspaceBoost": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.1,
+          "description": "How strongly a session lifts when its working directory matches the current one. 0 disables it."
+        },
+        "lexicalCandidateMultiplier": { "type": "integer", "minimum": 1, "default": 20 },
+        "lexicalCandidateCap": { "type": "integer", "minimum": 1, "default": 500 },
+        "semanticSessionShortlist": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "Sessions kept after the session-level vector pass. Chunk vectors are loaded only for these, which is what keeps semantic search off a full scan."
+        }
+      }
+    },
+    "embeddings": {
+      "type": "object",
+      "description": "Local ONNX embedding model settings.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When false, indexing is faster and smaller and search runs keyword-only."
+        },
+        "model": {
+          "type": "string",
+          "default": "bge-small-en-v1.5",
+          "description": "A known model id, or any id when modelPath and tokenizerPath are both set.",
+          "examples": ["bge-small-en-v1.5", "snowflake-arctic-embed-s", "multilingual-e5-small"]
+        },
+        "modelKind": {
+          "type": ["string", "null"],
+          "enum": ["bert", "bge", "e5", null],
+          "default": null,
+          "description": "Pooling and prefix family. null infers it from the model id. Getting this wrong is silent: the model still returns a vector, just a materially worse one."
+        },
+        "modelPath": { "type": ["string", "null"], "default": null },
+        "tokenizerPath": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "vocab.txt for WordPiece models, sentencepiece.bpe.model for XLM-R models."
+        },
+        "modelsDirectory": { "type": ["string", "null"], "default": null },
+        "maxSequenceLength": { "type": "integer", "minimum": 16, "default": 512 },
+        "batchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 32,
+          "description": "Chunks per inference batch. Batching is what makes a first build over a large session store finish in minutes rather than hours."
+        },
+        "maxThreads": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Maximum CPU threads ONNX Runtime may use per inference. 0 means half the logical processors. ONNX otherwise takes every core, which on a large machine makes an index build saturate the system rather than merely occupy it."
+        },
+        "autoDownload": { "type": "boolean", "default": true }
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "Console rendering defaults.",
+      "additionalProperties": false,
+      "properties": {
+        "color": { "type": "string", "enum": ["auto", "always", "never"], "default": "auto" },
+        "defaultFormat": { "type": "string", "enum": ["text", "json", "ndjson"], "default": "text" },
+        "dateFormat": { "type": "string", "enum": ["relative", "absolute"], "default": "relative" },
+        "previewCharacters": { "type": "integer", "minimum": 0, "default": 120 }
+      }
+    }
+  }
+}

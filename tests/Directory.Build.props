@@ -1,0 +1,33 @@
+<Project>
+
+  <Import Project="$(MSBuildThisFileDirectory)..\Directory.Build.props" />
+
+  <!-- Test-suite specific overrides for analyzers that are too strict in tests. -->
+  <PropertyGroup>
+    <!--
+      CA1707   : identifiers with underscores (idiomatic in xUnit "Method_does_x" names).
+      CA2007   : ConfigureAwait(false), not relevant for test code.
+      CA1861   : constant arrays as arguments, fine in test data.
+      xUnit1004: skipped test reasons.
+    -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1861;xUnit1004</NoWarn>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- xUnit v3 test projects are self-hosting executables rather than library-plus-runner. -->
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="AwesomeAssertions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="AwesomeAssertions" />
+  </ItemGroup>
+
+</Project>

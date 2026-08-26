@@ -1,0 +1,95 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+
+[*.{json,jsonc,yml,yaml}]
+indent_size = 2
+
+[*.{csproj,props,targets,slnx,config,xml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.cs]
+# Namespaces / usings
+csharp_style_namespace_declarations = file_scoped:error
+dotnet_sort_system_directives_first = true
+csharp_using_directive_placement = outside_namespace:warning
+
+# Expression-bodied members
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = true:suggestion
+csharp_style_expression_bodied_accessors = true:suggestion
+csharp_style_expression_bodied_lambdas = true:suggestion
+
+# Modern C#
+csharp_style_var_for_built_in_types = false:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_prefer_primary_constructors = true:suggestion
+csharp_style_prefer_pattern_matching = true:suggestion
+csharp_style_prefer_switch_expression = true:suggestion
+csharp_style_prefer_range_operator = true:suggestion
+csharp_style_prefer_index_operator = true:suggestion
+csharp_prefer_simple_using_statement = true:suggestion
+csharp_style_prefer_utf8_string_literals = true:suggestion
+dotnet_style_collection_initializer = true:suggestion
+dotnet_style_prefer_collection_expression = true:suggestion
+dotnet_style_object_initializer = true:suggestion
+dotnet_style_coalesce_expression = true:suggestion
+dotnet_style_null_propagation = true:suggestion
+
+# Braces are always required. A one-line if without braces is the single most common
+# source of accidental control-flow bugs during refactors.
+csharp_prefer_braces = true:error
+
+# Accessibility modifiers are always explicit, except on interface members where they are
+# redundant noise (interface members are public by definition).
+dotnet_style_require_accessibility_modifiers = for_non_interface_members:error
+
+# this. is never used; there is no naming collision convention in this repo that needs it.
+dotnet_style_qualification_for_field = false:error
+dotnet_style_qualification_for_property = false:error
+dotnet_style_qualification_for_method = false:error
+dotnet_style_qualification_for_event = false:error
+
+# Naming: interfaces prefixed with I, types/members PascalCase, private fields camelCase.
+dotnet_naming_rule.interfaces_start_with_i.severity = error
+dotnet_naming_rule.interfaces_start_with_i.symbols = interface_symbols
+dotnet_naming_rule.interfaces_start_with_i.style = i_prefix_style
+dotnet_naming_symbols.interface_symbols.applicable_kinds = interface
+dotnet_naming_style.i_prefix_style.required_prefix = I
+dotnet_naming_style.i_prefix_style.capitalization = pascal_case
+
+dotnet_naming_rule.types_are_pascal_case.severity = error
+dotnet_naming_rule.types_are_pascal_case.symbols = type_symbols
+dotnet_naming_rule.types_are_pascal_case.style = pascal_case_style
+dotnet_naming_symbols.type_symbols.applicable_kinds = class,struct,enum,delegate
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
+
+dotnet_naming_rule.private_fields_are_camel_case.severity = suggestion
+dotnet_naming_rule.private_fields_are_camel_case.symbols = private_field_symbols
+dotnet_naming_rule.private_fields_are_camel_case.style = camel_case_style
+dotnet_naming_symbols.private_field_symbols.applicable_kinds = field
+dotnet_naming_symbols.private_field_symbols.applicable_accessibilities = private
+dotnet_naming_style.camel_case_style.capitalization = camel_case
+
+# CA1062: null-checking public arguments. The CLI/MCP surface validates at the boundary.
+dotnet_diagnostic.CA1062.severity = none
+# CA1303: literals passed to logging/console methods do not need resource lookups.
+dotnet_diagnostic.CA1303.severity = none
+# CA1305/CA1307/CA1310: culture-sensitive overloads. InvariantGlobalization is on.
+dotnet_diagnostic.CA1305.severity = none
+dotnet_diagnostic.CA1307.severity = none
+dotnet_diagnostic.CA1310.severity = none
+# CA1054/CA1056: string URI parameters. Session URIs are opaque handles, not System.Uri.
+dotnet_diagnostic.CA1054.severity = none
+dotnet_diagnostic.CA1056.severity = none
+# CA1819: properties returning arrays. Records with array-backed collections are fine here.
+dotnet_diagnostic.CA1819.severity = none

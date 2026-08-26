@@ -1,0 +1,70 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Runtime">
+    <PackageVersion Include="System.CommandLine" Version="2.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.8" />
+  </ItemGroup>
+
+  <ItemGroup Label="Storage">
+    <!--
+      Microsoft.Data.Sqlite pulls SQLitePCLRaw.bundle_e_sqlite3, whose bundled native
+      library has FTS5 compiled in. No extension loading or Batteries.Init() required.
+    -->
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <!--
+      Transitive pins. Microsoft.Data.Sqlite 10.0.7 still resolves SQLitePCLRaw 2.1.11, whose
+      native library carries a high-severity advisory (GHSA-2m69-gcr7-jv3q) that fails the build
+      under NuGet audit. 2.1.13 is the smallest step off it: same 2.1.x line, same bundling and
+      FTS5 story, so the note above continues to hold. The whole family moves together because
+      the managed core, the provider and the native bundle are versioned in lockstep and mixing
+      them produces a runtime entry-point mismatch rather than a build error. Revisit when
+      Microsoft.Data.Sqlite ships a version that resolves a patched SQLitePCLRaw on its own.
+    -->
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <PackageVersion Include="SQLitePCLRaw.core" Version="2.1.13" />
+    <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.13" />
+    <PackageVersion Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.13" />
+  </ItemGroup>
+
+  <ItemGroup Label="Embeddings">
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
+    <!--
+      Microsoft.ML.Tokenizers provides BertTokenizer (WordPiece, for the bge / arctic
+      models) and SentencePieceTokenizer (XLM-R BPE, for multilingual-e5-small).
+    -->
+    <PackageVersion Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="MCP">
+    <PackageVersion Include="ModelContextProtocol" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Build">
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.203" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <!--
+      xUnit v3 rather than v2: it supplies TestContext.Current.CancellationToken (so a hung test
+      is cancelled rather than wedging the run) and first-class Assert.Skip, which this suite leans
+      on heavily since several tests only run when a given harness is installed.
+    -->
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="AwesomeAssertions" Version="9.4.0" />
+  </ItemGroup>
+
+</Project>

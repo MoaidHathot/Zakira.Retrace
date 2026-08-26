@@ -1,0 +1,16 @@
+# Every file in this repository is authored and stored with LF endings.
+#
+# This is declared rather than assumed because core.autocrlf is enabled on some
+# machines, which rewrites the working tree to CRLF on checkout and reintroduces
+# exactly the carriage returns the sources are kept free of. Recording the rule
+# here makes it a property of the repository instead of a property of whoever
+# happened to clone it.
+* text=auto eol=lf
+
+# Content that must never be line-ending translated.
+*.onnx binary
+*.nupkg binary
+*.snupkg binary
+*.db binary
+*.png binary
+*.ico binary

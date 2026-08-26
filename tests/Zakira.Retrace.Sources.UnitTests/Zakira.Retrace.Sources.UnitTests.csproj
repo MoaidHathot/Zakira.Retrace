@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.Sources.UnitTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Abstractions\Zakira.Retrace.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Core\Zakira.Retrace.Core.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Sources.OpenCode\Zakira.Retrace.Sources.OpenCode.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Sources.CopilotCli\Zakira.Retrace.Sources.CopilotCli.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Retrace.Sources.CopilotVsCode\Zakira.Retrace.Sources.CopilotVsCode.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+
+</Project>
