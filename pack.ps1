@@ -43,9 +43,11 @@
     when the version is already on nuget.org).
 
 .PARAMETER LocalFeed
-    Copy the produced packages into the machine-wide private folder feed after packing,
+    Publish the produced packages into the machine-wide private folder feed after packing,
     so `dotnet tool install -g Zakira.Retrace` resolves them without a nuget.org round
-    trip. Independent of -Push.
+    trip. Uses `dotnet nuget push` against the folder, which lays the package out as
+    <id>/<version>/ with its .nuspec and .sha512, matching the other packages in the feed.
+    Independent of -Push.
 
 .PARAMETER LocalFeedPath
     Folder feed to copy into when -LocalFeed is set. Default: C:\nuget\local-feed,
@@ -131,10 +133,17 @@ if ($LocalFeed) {
     }
 
     foreach ($package in $packages) {
-        # A folder feed is served by file name, so an existing file for the same version is
-        # stale rather than authoritative: overwrite it, or a rebuilt 0.1.0 would install as
-        # whatever happened to be copied there first.
-        Copy-Item -LiteralPath $package.FullName -Destination $LocalFeedPath -Force
+        # Push rather than copy. The feed uses the hierarchical layout NuGet expands a push
+        # into — <id>/<version>/<id>.<version>.nupkg plus the extracted .nuspec and a .sha512 —
+        # which is what every other package there looks like and what the client resolves
+        # fastest. A bare file dropped in the root is a different, flat feed format; mixing
+        # the two makes restore see one and not the other.
+        #
+        # --skip-duplicate keeps a re-run of the same version from failing; a folder feed has
+        # no notion of overwriting, so bump the version to publish a changed build.
+        # --no-symbols because the folder has nowhere meaningful to put a .snupkg.
+        & dotnet nuget push $package.FullName --source $LocalFeedPath --skip-duplicate --no-symbols
+        if ($LASTEXITCODE -ne 0) { throw "dotnet nuget push to the local feed failed with exit code $LASTEXITCODE." }
         Write-Host "  $($package.Name)"
     }
 

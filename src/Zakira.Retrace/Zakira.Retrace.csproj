@@ -16,9 +16,9 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>retrace</ToolCommandName>
     <PackageId>Zakira.Retrace</PackageId>
-    <Description>Search, read, and resume AI coding sessions across harnesses. Indexes OpenCode, GitHub Copilot CLI, and Copilot in VS Code into one local hybrid (BM25 + local ONNX embeddings) search index. Ships as both a CLI (`retrace`) and an MCP server (`retrace mcp serve`) in one .NET 10 binary.</Description>
-    <PackageTags>ai;agent;sessions;search;mcp;cli;dotnet-tool;opencode;copilot;zakira</PackageTags>
-    <PackageReleaseNotes>0.1.0 — first release. Sources: OpenCode, Copilot CLI, Copilot VS Code. Hybrid FTS5 + ONNX embedding search, incremental indexing, CLI and MCP server.</PackageReleaseNotes>
+    <Description>Search, read, and resume AI coding sessions across harnesses. Indexes OpenCode, GitHub Copilot CLI, and Copilot in VS Code into one local hybrid (BM25 + local ONNX embeddings) search index. Ships as a CLI (`retrace`), an interactive terminal browser (`retrace tui`), and an MCP server (`retrace mcp serve`) in one .NET 10 binary.</Description>
+    <PackageTags>ai;agent;sessions;search;mcp;cli;tui;dotnet-tool;opencode;copilot;zakira</PackageTags>
+    <PackageReleaseNotes>0.2.0 — `retrace tui`: an interactive, keyboard-driven browser to search, read, and resume sessions (with --pick for shell integration). Per-source `indexByDefault` to keep a harness available without paying to index it on every build. `resume --exec` now works with npm-installed harnesses on Windows.</PackageReleaseNotes>
     <!--
       LatestMajor lets the tool run on a newer runtime than it was built against, which is
       what makes `dnx Zakira.Retrace ...` work on a machine that only has a later SDK.
