@@ -15,6 +15,13 @@ public enum QueryMode
     Live
 }
 
+/// <summary>The outcome of probing one source, with the configuration that applies to it.</summary>
+/// <param name="Source">The source.</param>
+/// <param name="Availability">Whether its store could be read.</param>
+/// <param name="Enabled">Whether configuration lets it participate at all.</param>
+/// <param name="IndexedByDefault">Whether an unscoped build or inline top-up includes it.</param>
+public sealed record SourceProbe(ISessionSource Source, SourceAvailability Availability, bool Enabled, bool IndexedByDefault);
+
 /// <summary>
 /// The single entry point the CLI and the MCP server both call.
 /// </summary>
@@ -45,18 +52,22 @@ public sealed class SessionCatalog(
     public IReadOnlyList<ISessionSource> AllSources => allSources;
 
     /// <summary>Whether a source is enabled in configuration.</summary>
-    public bool IsEnabled(ISessionSource source) => source.Id switch
-    {
-        "opencode" => config.Sources.OpenCode.Enabled,
-        "copilot-cli" => config.Sources.CopilotCli.Enabled,
-        "copilot-vscode" => config.Sources.CopilotVsCode.Enabled,
-        _ => true
-    };
+    public bool IsEnabled(ISessionSource source) => config.Sources.IsEnabled(source.Id);
+
+    /// <summary>
+    /// Whether a source is picked up by an unscoped index build and by the automatic top-up.
+    /// </summary>
+    /// <remarks>
+    /// A source that is enabled but not indexed by default is still fully usable: it is listed,
+    /// its sessions can be shown and resumed, and whatever an explicit <c>--source</c> build put in
+    /// the index is still searched. It simply stops costing anything until asked for by name.
+    /// </remarks>
+    public bool IsIndexedByDefault(ISessionSource source) => config.Sources.IsIndexedByDefault(source.Id);
 
     /// <summary>Probes every source.</summary>
-    public async Task<IReadOnlyList<(ISessionSource Source, SourceAvailability Availability, bool Enabled)>> ProbeAllAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<SourceProbe>> ProbeAllAsync(CancellationToken cancellationToken)
     {
-        var results = new List<(ISessionSource, SourceAvailability, bool)>();
+        var results = new List<SourceProbe>();
 
         foreach (var source in allSources)
         {
@@ -74,7 +85,7 @@ public sealed class SessionCatalog(
                 availability = SourceAvailability.Unavailable(ex.Message);
             }
 
-            results.Add((source, availability, enabled));
+            results.Add(new SourceProbe(source, availability, enabled, IsIndexedByDefault(source)));
         }
 
         return results;
@@ -241,7 +252,10 @@ public sealed class SessionCatalog(
 
         var stale = new List<string>();
 
-        foreach (var source in Sources)
+        // Only sources indexed by default are considered. A source the user took out of the
+        // default indexing path must not sneak back in through the top-up, or the setting would
+        // merely move the cost from `index refresh` into every search.
+        foreach (var source in Sources.Where(IsIndexedByDefault))
         {
             if (source is not IIncrementalSource incremental)
             {

@@ -168,17 +168,20 @@ public sealed class IndexBuilder(
 
         await EnsureEmbeddingCompatibilityAsync(connection, embedder, options.Force, cancellationToken).ConfigureAwait(false);
 
-        var selected = options.SourceIds.Count == 0
-            ? sources
-            : [.. sources.Where(source => options.SourceIds.Contains(source.Id, StringComparer.OrdinalIgnoreCase))];
-
         var results = new List<SourceIndexResult>();
 
         try
         {
-            foreach (var source in selected)
+            foreach (var (source, skipReason) in SelectSources(options))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                if (skipReason is not null)
+                {
+                    results.Add(new SourceIndexResult { SourceId = source.Id, SkipReason = skipReason });
+                    continue;
+                }
+
                 results.Add(await IndexSourceAsync(connection, source, embedder, options, cancellationToken).ConfigureAwait(false));
             }
         }
@@ -202,6 +205,56 @@ public sealed class IndexBuilder(
             Duration = started.Elapsed,
             EmbeddingModel = embedder?.ModelId
         };
+    }
+
+    /// <summary>
+    /// Decides which sources this build covers, and why any that are present were left out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two settings shape the answer. A disabled source is never indexed, named or not: disabling
+    /// is the user saying the harness does not exist as far as Retrace is concerned. A source that
+    /// is enabled but not indexed by default is skipped only when the build is unscoped; naming it
+    /// with <c>--source</c> is precisely how the user asks for it.
+    /// </para>
+    /// <para>
+    /// Skipped sources are returned with a reason rather than silently dropped, so a build's
+    /// summary shows every source the user might have expected and says what happened to each.
+    /// Without that, a source turned off months ago looks exactly like one that simply had nothing
+    /// new.
+    /// </para>
+    /// </remarks>
+    private IEnumerable<(ISessionSource Source, string? SkipReason)> SelectSources(IndexBuildOptions options)
+    {
+        var explicitlyNamed = options.SourceIds.Count > 0;
+
+        foreach (var source in sources)
+        {
+            if (explicitlyNamed && !options.SourceIds.Contains(source.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!config.Sources.IsEnabled(source.Id))
+            {
+                // Only worth reporting when the user asked for it by name; an unscoped build over
+                // a long-disabled source would otherwise print the same line forever.
+                if (explicitlyNamed)
+                {
+                    yield return (source, $"disabled in configuration (sources.{source.Id}.enabled = false)");
+                }
+
+                continue;
+            }
+
+            if (!explicitlyNamed && !config.Sources.IsIndexedByDefault(source.Id))
+            {
+                yield return (source, $"not indexed by default (sources.{source.Id}.indexByDefault = false); pass --source {source.Id} to index it");
+                continue;
+            }
+
+            yield return (source, null);
+        }
     }
 
     private async Task<SourceIndexResult> IndexSourceAsync(

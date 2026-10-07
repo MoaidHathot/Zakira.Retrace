@@ -24,7 +24,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
+            "enabled": { "type": "boolean", "default": true, "description": "Whether this source participates in listing, search, and indexing at all." },
+            "indexByDefault": { "type": "boolean", "default": true, "description": "Include this source in `retrace index build` / `refresh` when no --source is given, and in the automatic inline top-up. Set to false for a harness you keep available but rarely search: it stays listable, showable, and resumable, and `--source <id>` still indexes it on request." },
             "dataDirectory": {
               "type": ["string", "null"],
               "default": null,
@@ -46,7 +47,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
+            "enabled": { "type": "boolean", "default": true, "description": "Whether this source participates in listing, search, and indexing at all." },
+            "indexByDefault": { "type": "boolean", "default": true, "description": "Include this source in `retrace index build` / `refresh` when no --source is given, and in the automatic inline top-up. Set to false for a harness you keep available but rarely search: it stays listable, showable, and resumable, and `--source <id>` still indexes it on request." },
             "dataDirectory": { "type": ["string", "null"], "default": null },
             "minTurns": {
               "type": "integer",
@@ -65,7 +67,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
+            "enabled": { "type": "boolean", "default": true, "description": "Whether this source participates in listing, search, and indexing at all." },
+            "indexByDefault": { "type": "boolean", "default": true, "description": "Include this source in `retrace index build` / `refresh` when no --source is given, and in the automatic inline top-up. Set to false for a harness you keep available but rarely search: it stays listable, showable, and resumable, and `--source <id>` still indexes it on request." },
             "dataDirectory": { "type": ["string", "null"], "default": null },
             "editors": {
               "type": "array",
@@ -224,6 +227,28 @@
         "defaultFormat": { "type": "string", "enum": ["text", "json", "ndjson"], "default": "text" },
         "dateFormat": { "type": "string", "enum": ["relative", "absolute"], "default": "relative" },
         "previewCharacters": { "type": "integer", "minimum": 0, "default": 120 }
+      }
+    },
+    "tui": {
+      "type": "object",
+      "description": "Interactive browser (`retrace tui`) defaults.",
+      "additionalProperties": false,
+      "properties": {
+        "mouse": {
+          "type": "boolean",
+          "default": true,
+          "description": "Capture mouse wheel and clicks. Turn off to keep the terminal's native text selection."
+        },
+        "previewMaxCharacters": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 60000,
+          "description": "Character budget for the transcript loaded into the preview and reader panes. 0 means unbounded."
+        },
+        "showToolOutput": { "type": "boolean", "default": false, "description": "Show captured tool output in the reader. Toggle at runtime with x." },
+        "showReasoning": { "type": "boolean", "default": false, "description": "Show model reasoning in the reader. Toggle at runtime with z." },
+        "listLimit": { "type": "integer", "minimum": 1, "default": 200, "description": "Sessions fetched for the browse list when no query is typed." },
+        "searchLimit": { "type": "integer", "minimum": 1, "default": 50, "description": "Results fetched per search." }
       }
     }
   }

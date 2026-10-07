@@ -51,7 +51,8 @@
   </ItemGroup>
 
   <ItemGroup Label="Build">
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.203" />
+    <!-- 10.0.203 pulled in Microsoft.Build.Tasks.Git with a known advisory (GHSA-23fw-v26w-5fgq). -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
   </ItemGroup>
 
   <ItemGroup Label="Test">

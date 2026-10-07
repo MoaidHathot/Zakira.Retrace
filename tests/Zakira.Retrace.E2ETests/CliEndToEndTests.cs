@@ -211,10 +211,64 @@ public sealed class CliEndToEndTests
         result.ExitCode.Should().Be(0);
 
         foreach (var command in (string[])
-                 ["sources", "doctor", "info", "list", "search", "show", "export", "files", "resume", "tag", "index", "deps", "config", "mcp"])
+                 ["sources", "doctor", "info", "tui", "list", "search", "show", "export", "files", "resume", "tag", "index", "deps", "config", "mcp"])
         {
             result.All.Should().Contain(command);
         }
+    }
+
+    [Fact]
+    public async Task Tui_without_a_terminal_fails_with_guidance_instead_of_garbage()
+    {
+        using var runner = new RetraceRunner();
+
+        // The runner redirects every stream, which is exactly the situation a script or an agent
+        // puts the tool in. The browser must refuse cleanly rather than spray escape codes.
+        var result = await runner.RunAsync("tui");
+
+        result.ExitCode.Should().Be(1);
+        result.StandardError.Should().Contain("requires a terminal");
+        result.StandardOutput.Should().NotContain("\u001b[?1049h", "the alternate screen must never be entered without a terminal");
+        result.StandardError.Should().NotContain("Unhandled exception");
+    }
+
+    [Fact]
+    public async Task Tui_rejects_an_unknown_pick_kind()
+    {
+        using var runner = new RetraceRunner();
+
+        var result = await runner.RunAsync("tui", "--pick", "banana");
+
+        result.ExitCode.Should().Be(1);
+        result.StandardError.Should().Contain("uri, id, dir, or command");
+    }
+
+    [Fact]
+    public async Task Sources_reports_the_indexing_policy_and_index_build_honours_it()
+    {
+        using var runner = new RetraceRunner();
+
+        (await runner.RunAsync("config", "set", "sources.copilot-cli.indexByDefault", "false")).ExitCode.Should().Be(0);
+
+        var sources = await runner.RunAsync("sources", "--output", "json");
+        sources.ExitCode.Should().Be(0);
+
+        using var document = JsonDocument.Parse(sources.StandardOutput);
+        var copilot = document.RootElement.EnumerateArray().Single(source => source.GetProperty("id").GetString() == "copilot-cli");
+        copilot.GetProperty("enabled").GetBoolean().Should().BeTrue();
+        copilot.GetProperty("indexByDefault").GetBoolean().Should().BeFalse();
+
+        // Whether or not the harness is installed on this machine, the build must report the
+        // source as skipped for the configured reason rather than reading it.
+        var build = await runner.RunAsync("index", "build", "--no-embed", "--source", "copilot-cli", "--output", "json");
+        build.ExitCode.Should().Be(0);
+
+        var unscoped = await runner.RunAsync("index", "build", "--no-embed", "--output", "json");
+        unscoped.ExitCode.Should().Be(0);
+        using var buildDocument = JsonDocument.Parse(unscoped.StandardOutput);
+        var skipped = buildDocument.RootElement.GetProperty("sources").EnumerateArray()
+            .Single(source => source.GetProperty("sourceId").GetString() == "copilot-cli");
+        skipped.GetProperty("skipReason").GetString().Should().Contain("indexByDefault");
     }
 
     [Fact]

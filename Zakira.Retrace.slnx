@@ -14,11 +14,13 @@
     <Project Path="src/Zakira.Retrace.Sources.OpenCode/Zakira.Retrace.Sources.OpenCode.csproj" />
     <Project Path="src/Zakira.Retrace.Sources.CopilotCli/Zakira.Retrace.Sources.CopilotCli.csproj" />
     <Project Path="src/Zakira.Retrace.Sources.CopilotVsCode/Zakira.Retrace.Sources.CopilotVsCode.csproj" />
+    <Project Path="src/Zakira.Retrace.Tui/Zakira.Retrace.Tui.csproj" />
     <Project Path="src/Zakira.Retrace/Zakira.Retrace.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Zakira.Retrace.Core.UnitTests/Zakira.Retrace.Core.UnitTests.csproj" />
     <Project Path="tests/Zakira.Retrace.Sources.UnitTests/Zakira.Retrace.Sources.UnitTests.csproj" />
+    <Project Path="tests/Zakira.Retrace.Tui.UnitTests/Zakira.Retrace.Tui.UnitTests.csproj" />
     <Project Path="tests/Zakira.Retrace.E2ETests/Zakira.Retrace.E2ETests.csproj" />
   </Folder>
 </Solution>

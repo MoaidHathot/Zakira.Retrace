@@ -12,6 +12,7 @@ Everything is local. No account, no API key, no network at query time, no backgr
 dotnet tool install -g Zakira.Retrace
 retrace index build
 retrace search "how did I set up the retry policy"
+retrace tui                       # or browse interactively
 ```
 
 Or without installing anything:
@@ -51,6 +52,7 @@ of what is possible; the alternative would be a command that looks like it worke
 ## Commands
 
 ```
+retrace tui [query]             Browse, search, read, and resume interactively
 retrace sources                 List sources and whether each is readable
 retrace doctor                  Check config, sources, index, and models
 retrace info                    Resolved paths, model, and search settings
@@ -67,6 +69,78 @@ retrace index build|refresh|status|clear
 retrace deps install onnx       Download the local embedding model
 retrace config path|init|list|get|set
 retrace mcp serve               Run as an MCP server
+```
+
+## The browser
+
+`retrace tui` is the fast path from "I remember doing this" to sitting in that session again. It
+is a full-screen, keyboard-driven browser in the lazygit mould: a search box that queries as you
+type, a session list, a preview pane, and a reader — with the actions you would otherwise chain
+three commands together for bound to single keys.
+
+```
+╭─ Search ────────────────────────────────────────────────────────────────────────╮
+│ / retry backoff▏                                                        [hybrid] │
+╰─────────────────────────────────────────────────────────────────────────────────╯
+╭─ Matches (4) ─────────────────────────╮╭─ Preview  opencode/ses_3aa5f96a ──────╮
+│▍3d ago   opencode Fix retry logic…    ││ Matches                                │
+│          assistant: …exponential bac… ││ [3] assistant: …add exponential backoff│
+│ 1w ago   copilot  Investigate flaky…  ││ ──────────────────────────────────────│
+│          user: the retry test is fla… ││ Fix retry logic in HttpClient          │
+│                                       ││ retrace://opencode/ses_3aa5f96adffe…   │
+│                                       ││ W:\Github\Alpha  |  agent build  |  …  │
+│                                       ││                                        │
+│                                       ││ [0] user  10:32:01                     │
+│                                       ││   The retries never back off           │
+╰───────────────────────────────────────╯╰────────────────────────────────────────╯
+ 4 match(es)              j/k move  enter open  / search  r resume  c copy cmd  ? help
+```
+
+The flow the tool exists for is three keys long: type a few words, arrow to the session,
+press `r`. Retrace shows the exact command and working directory, and on Enter it restores your
+terminal and hands it to the harness — `opencode --session <id>` running in the directory the
+session was recorded in. When the harness exits, so does Retrace.
+
+| Key | Action |
+|---|---|
+| type, `/` | search as you type; empty query shows recent sessions |
+| `↑`/`↓` `j`/`k`, `g`/`G`, `PgUp`/`PgDn` | move |
+| `Enter`, `l` | open the reader (full transcript, `n`/`N` jump between matches, `]`/`[` between turns) |
+| `Tab`, `J`/`K` | focus or scroll the preview |
+| `r`, `R` | resume the session in its harness; `R` forks where supported |
+| `c`, `y`, `Y`, `d` | copy the resume command / `retrace://` URI / native id / working directory |
+| `o` | open the working directory in the file manager |
+| `e` | export the transcript as Markdown into the current directory |
+| `t` | tag the session (`-name` removes) |
+| `i` | session details |
+| `s`, `w`, `a`, `m` | cycle source filter, toggle current-directory filter, toggle archived, cycle search mode |
+| `x`, `z` | show or hide tool output and reasoning |
+| `Ctrl+R` | refresh the index (keyword-only, like the automatic top-up) and re-run the query |
+| `?` | every key |
+
+The mouse works too — wheel to scroll whichever pane it is over, click to select, click again to
+open — and `--no-mouse` (or `tui.mouse: false`) gives it back to the terminal when you would
+rather select text.
+
+The `tui` command takes the same filters as `list` and `search`, so `retrace tui --here` starts
+scoped to the current directory and `retrace tui --source opencode "connection pool"` starts with a
+query already running.
+
+### Shell integration
+
+`retrace tui --pick dir|uri|id|command` turns the browser into a picker: Enter prints the chosen
+value to stdout and exits, while the interface itself draws on stderr. That is what makes it usable
+inside a command substitution:
+
+```powershell
+# PowerShell: jump to the directory of a past session
+function rcd { $dir = retrace tui --pick dir; if ($dir) { Set-Location $dir } }
+```
+
+```bash
+# bash / zsh
+rcd() { local dir; dir="$(retrace tui --pick dir)" && cd "$dir"; }
+alias rr='eval "$(retrace tui --pick command)"'   # pick a session, run its resume command
 ```
 
 ### Filters
@@ -152,6 +226,30 @@ retrace index build --prune      # drop sessions deleted from their source
 retrace index build --no-embed   # keyword-only, much faster
 retrace index status
 ```
+
+### Choosing what gets indexed by default
+
+Not every harness deserves the same share of a build. A Copilot CLI that automation drives all day
+can hold ten or twenty thousand sessions you will never search, and reading each one is what makes
+`index build` take minutes rather than seconds. Each source has two switches:
+
+```bash
+retrace config set sources.copilot-cli.indexByDefault false   # keep it, but stop paying for it
+retrace config set sources.copilot-cli.enabled false          # pretend it does not exist
+```
+
+With `indexByDefault` off, the source is skipped by `index build`, `index refresh`, and the
+automatic inline top-up — and `retrace sources`, `doctor`, and the build summary all say so, so it
+cannot be mistaken for a source that simply had nothing new. Everything else keeps working: it is
+still listed, `show` and `resume` still read it, `--live` queries still reach it, and whatever an
+explicit build put in the index is still searched. When you do want it, name it:
+
+```bash
+retrace index build --source copilot-cli --since 30d --no-embed   # just the recent part, cheaply
+```
+
+`enabled` is the blunter instrument: a disabled source is invisible everywhere and is never
+indexed, even when named.
 
 ### Scoping a build by time
 
@@ -293,7 +391,9 @@ retrace config path
 retrace config list
 retrace config set search.rrfK 80
 retrace config set sources.copilot-vscode.editors stable,insiders
+retrace config set sources.copilot-cli.indexByDefault false
 retrace config set embeddings.enabled false
+retrace config set tui.mouse false
 ```
 
 The index and downloaded models are **not** stored with the config. They are large,
@@ -375,11 +475,16 @@ src/
   Zakira.Retrace.Sources.OpenCode/
   Zakira.Retrace.Sources.CopilotCli/
   Zakira.Retrace.Sources.CopilotVsCode/
+  Zakira.Retrace.Tui/                   The interactive browser: a hand-rolled terminal engine
+                                        (cell buffer, diffed VT output, Win32 and termios input)
+                                        with no library dependencies, plus the browser itself.
   Zakira.Retrace/                       CLI and MCP server. The packable tool.
 tests/
-  Zakira.Retrace.Core.UnitTests/        Config, paths, chunking, index, fusion, vectors.
+  Zakira.Retrace.Core.UnitTests/        Config, paths, chunking, index, fusion, vectors, policy.
   Zakira.Retrace.Sources.UnitTests/     Synthetic stores built to each harness's real schema,
                                         plus live-store tests that skip when a harness is absent.
+  Zakira.Retrace.Tui.UnitTests/         Input decoding, cell rendering, and the browser driven
+                                        headlessly against an in-memory backend.
   Zakira.Retrace.E2ETests/              Spawns the built binary; drives MCP over real stdio.
 ```
 

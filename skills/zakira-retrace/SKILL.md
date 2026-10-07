@@ -115,6 +115,14 @@ user decide.
 
 `retrace search` exits non-zero when there are no matches; that is a normal outcome, not a failure.
 
+A source can be configured with `sources.<id>.indexByDefault = false`, which keeps it readable
+but leaves it out of every automatic refresh. `retrace sources` shows such sources as "manual
+indexing". If the user asks about a session from one of those and search cannot find it, say so
+and suggest `retrace index build --source <id> --since 30d --no-embed` rather than running it.
+
+Never run `retrace tui`. It is a full-screen interactive browser for a human at a terminal; from an
+agent it fails with an error, and inside a pipe it has nothing to draw on.
+
 ## Interpreting output
 
 - `uri` is the stable handle. Use it, not the bare id, when passing a session between commands.

@@ -104,7 +104,9 @@ internal static class TextRenderer
             writer.WriteLine();
         }
 
-        writer.WriteLine(ConsoleStyle.Dim($"{hits.Count} match(es). Use `retrace show <id>` to read one."));
+        writer.WriteLine(ConsoleStyle.Dim(
+            $"{hits.Count} match(es). `retrace show <id>` reads one, `retrace resume <id> --exec` reopens it in its harness, "
+            + "`retrace tui` browses interactively."));
     }
 
     /// <summary>Renders a transcript.</summary>

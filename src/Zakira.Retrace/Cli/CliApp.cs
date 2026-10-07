@@ -1,5 +1,4 @@
 using System.CommandLine;
-using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Zakira.Retrace.Abstractions;
@@ -10,6 +9,7 @@ using Zakira.Retrace.Core.Index;
 using Zakira.Retrace.Core.Json;
 using Zakira.Retrace.Core.Services;
 using Zakira.Retrace.Mcp;
+using Zakira.Retrace.Tui;
 
 namespace Zakira.Retrace.Cli;
 
@@ -60,6 +60,7 @@ public static class CliApp
         root.Subcommands.Add(BuildInfoCommand(host, stdout));
         root.Subcommands.Add(BuildSourcesCommand(host, stdout));
         root.Subcommands.Add(BuildDoctorCommand(host, stdout));
+        root.Subcommands.Add(BuildTuiCommand(host, stdout, stderr));
         root.Subcommands.Add(BuildListCommand(host, stdout));
         root.Subcommands.Add(BuildSearchCommand(host, stdout));
         root.Subcommands.Add(BuildShowCommand(host, stdout));
@@ -76,11 +77,107 @@ public static class CliApp
         {
             stderr.WriteLine(parseResult.CommandResult.Command.Description);
             stderr.WriteLine();
-            stderr.WriteLine("Run 'retrace --help' to see available commands.");
+            stderr.WriteLine("Run 'retrace tui' to browse sessions interactively, or 'retrace --help' to see every command.");
             return 1;
         });
 
         return root;
+    }
+
+    // ---- tui -------------------------------------------------------------------------------
+
+    private static Command BuildTuiCommand(RetraceHost host, TextWriter stdout, TextWriter stderr)
+    {
+        var filters = new FilterOptions();
+        var query = new Argument<string?>("query")
+        {
+            Description = "Search to start with, as if typed into the search box.",
+            Arity = ArgumentArity.ZeroOrOne
+        };
+
+        var pick = new Option<string?>("--pick")
+        {
+            Description = "Run as a picker: Enter prints the chosen session's uri, id, dir, or command to stdout and exits. "
+                + "Draws on stderr, so it works inside $(...) — for example `cd (retrace tui --pick dir)`."
+        };
+
+        var noMouse = new Option<bool>("--no-mouse") { Description = "Leave the mouse to the terminal, so native text selection keeps working." };
+
+        var command = new Command("tui", "Browse, search, read, and resume sessions interactively.");
+        command.Aliases.Add("ui");
+        command.Aliases.Add("browse");
+        command.Arguments.Add(query);
+        filters.AddTo(command);
+        command.Options.Add(pick);
+        command.Options.Add(noMouse);
+
+        command.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var pickKind = parseResult.GetValue(pick)?.Trim().ToLowerInvariant() switch
+            {
+                null or "" => PickKind.None,
+                "uri" => PickKind.Uri,
+                "id" => PickKind.Id,
+                "dir" or "directory" or "cwd" or "path" => PickKind.Directory,
+                "command" or "cmd" or "resume" => PickKind.Command,
+                var other => throw new RetraceException($"Unknown --pick value '{other}'. Use uri, id, dir, or command.")
+            };
+
+            if (Console.IsInputRedirected || (Console.IsOutputRedirected && Console.IsErrorRedirected))
+            {
+                throw new RetraceException(
+                    "The interactive browser requires a terminal. Use `retrace search` and `retrace show` for scripted use, "
+                    + "or `retrace tui --pick ...` inside a command substitution so it can draw on stderr.");
+            }
+
+            var config = await host.GetConfigAsync(cancellationToken).ConfigureAwait(false);
+            var catalog = await host.GetServiceAsync<SessionCatalog>(cancellationToken).ConfigureAwait(false);
+            var tags = await host.GetServiceAsync<TagStore>(cancellationToken).ConfigureAwait(false);
+            var searcher = await host.GetServiceAsync<IndexSearcher>(cancellationToken).ConfigureAwait(false);
+
+            var browserOptions = new BrowserOptions
+            {
+                InitialQuery = parseResult.GetValue(query),
+                Filter = filters.Build(parseResult, limit: 0, SessionSortOrder.Recent),
+                Pick = pickKind,
+                SearchMode = ParseSearchMode(config.Search.Mode),
+                Mouse = config.Tui.Mouse && !parseResult.GetValue(noMouse),
+                PreviewMaxCharacters = config.Tui.PreviewMaxCharacters,
+                ShowToolOutput = config.Tui.ShowToolOutput,
+                ShowReasoning = config.Tui.ShowReasoning,
+                ListLimit = config.Tui.ListLimit,
+                SearchLimit = config.Tui.SearchLimit,
+                RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase)
+            };
+
+            BrowserResult outcome;
+            using (var browser = new SessionBrowser(new CatalogBrowserBackend(catalog, tags, searcher, config), browserOptions))
+            {
+                outcome = browser.Run(cancellationToken);
+            }
+
+            switch (outcome.Exit)
+            {
+                case BrowserExit.Resume when outcome.Resume is { } resume:
+                    stderr.WriteLine(ConsoleStyle.Dim($"Resuming {outcome.Session?.Ref.Uri}"));
+                    stderr.WriteLine(ConsoleStyle.Dim($"Running: {resume.DisplayCommand}"));
+                    if (resume.WorkingDirectory is { Length: > 0 } cwd)
+                    {
+                        stderr.WriteLine(ConsoleStyle.Dim($"     in: {cwd}"));
+                    }
+
+                    return await ResumeLauncher.RunAsync(resume, cancellationToken).ConfigureAwait(false);
+
+                case BrowserExit.Print when outcome.Output is { } output:
+                    stdout.WriteLine(output);
+                    return 0;
+
+                default:
+                    return 0;
+            }
+        });
+
+        return command;
     }
 
     // ---- version / info / sources / doctor -------------------------------------------------
@@ -176,6 +273,7 @@ public static class CliApp
                     id = probe.Source.Id,
                     name = probe.Source.DisplayName,
                     enabled = probe.Enabled,
+                    indexByDefault = probe.IndexedByDefault,
                     available = probe.Availability.IsAvailable,
                     reason = probe.Availability.Reason,
                     dataPath = probe.Availability.DataPath,
@@ -189,7 +287,7 @@ public static class CliApp
                 return 0;
             }
 
-            foreach (var (source, availability, enabled) in probes)
+            foreach (var (source, availability, enabled, indexedByDefault) in probes)
             {
                 var status = !enabled
                     ? ConsoleStyle.Dim("disabled")
@@ -198,7 +296,8 @@ public static class CliApp
                         : ConsoleStyle.Yellow("unavailable");
 
                 var count = availability.SessionCount is { } sessions ? $"  {sessions:N0} session(s)" : string.Empty;
-                stdout.WriteLine($"{ConsoleStyle.Bold(source.Id.PadRight(16))} {status}{ConsoleStyle.Dim(count)}");
+                var indexing = enabled && !indexedByDefault ? ConsoleStyle.Yellow("  manual indexing") : string.Empty;
+                stdout.WriteLine($"{ConsoleStyle.Bold(source.Id.PadRight(16))} {status}{ConsoleStyle.Dim(count)}{indexing}");
                 stdout.WriteLine($"  {ConsoleStyle.Dim(source.DisplayName)}");
 
                 if (availability.DataPath is { Length: > 0 } path)
@@ -209,6 +308,11 @@ public static class CliApp
                 if (availability.Reason is { Length: > 0 } reason)
                 {
                     stdout.WriteLine($"  {ConsoleStyle.Yellow(reason)}");
+                }
+
+                if (enabled && !indexedByDefault)
+                {
+                    stdout.WriteLine($"  {ConsoleStyle.Dim($"not indexed by default; `retrace index build --source {source.Id}` indexes it on request")}");
                 }
 
                 foreach (var detail in availability.Details)
@@ -245,7 +349,7 @@ public static class CliApp
                 ("data directory", CanUseDirectory(host.Paths.DataDirectory), host.Paths.DataDirectory)
             };
 
-            foreach (var (source, availability, enabled) in probes)
+            foreach (var (source, availability, enabled, indexedByDefault) in probes)
             {
                 checks.Add((
                     $"source: {source.Id}",
@@ -254,6 +358,7 @@ public static class CliApp
                         ? "disabled in configuration"
                         : availability.IsAvailable
                             ? $"{availability.SessionCount:N0} session(s) at {availability.DataPath}"
+                              + (indexedByDefault ? string.Empty : "  (manual indexing: not included in `index build` unless named with --source)")
                             : availability.Reason ?? "unavailable"));
             }
 
@@ -277,11 +382,21 @@ public static class CliApp
                 // enough that a raw file count reports a backlog no refresh can ever clear.
                 // Either mistake makes this check cry wolf, which is worse than not having it.
                 var behind = new List<string>();
+                var manual = new List<string>();
 
-                foreach (var (source, availability, enabled) in probes)
+                foreach (var (source, availability, enabled, indexedByDefault) in probes)
                 {
                     if (!enabled || !availability.IsAvailable)
                     {
+                        continue;
+                    }
+
+                    // A source taken out of the default indexing path is behind on purpose.
+                    // Counting its backlog would pin a permanent warning on a deliberate choice,
+                    // so it is named separately and never fails the check.
+                    if (!indexedByDefault)
+                    {
+                        manual.Add(source.Id);
                         continue;
                     }
 
@@ -298,12 +413,16 @@ public static class CliApp
                     }
                 }
 
+                var manualNote = manual.Count == 0
+                    ? string.Empty
+                    : $"  (manual indexing, not checked: {string.Join(", ", manual)})";
+
                 checks.Add((
                     "index freshness",
                     behind.Count == 0,
-                    behind.Count == 0
+                    (behind.Count == 0
                         ? "every source is fully indexed"
-                        : $"not yet indexed: {string.Join(", ", behind)} — run `retrace index refresh`"));
+                        : $"not yet indexed: {string.Join(", ", behind)} — run `retrace index refresh`") + manualNote));
 
                 // Reported, never judged. A source can be missing vectors because a keyword-only
                 // automatic refresh picked it up, or because it was deliberately left keyword-only
@@ -407,7 +526,7 @@ public static class CliApp
         var filters = new FilterOptions();
         var query = new Argument<string>("query") { Description = "What to search for. Quote a phrase for an exact match." };
         var top = new Option<int>("--top", "-n") { Description = "Maximum results.", DefaultValueFactory = _ => 0 };
-        var snippets = new Option<int>("--snippets") { Description = "Snippets to show per result.", DefaultValueFactory = _ => 0 };
+        var snippets = new Option<int?>("--snippets") { Description = "Snippets to show per result. 0 shows none, for a compact one-line-per-hit listing." };
         var lexicalOnly = new Option<bool>("--lexical-only") { Description = "Keyword matching only." };
         var semanticOnly = new Option<bool>("--semantic-only") { Description = "Vector similarity only." };
         var deep = new Option<bool>("--deep") { Description = "Score every chunk vector instead of a session shortlist. Slower, higher recall." };
@@ -444,7 +563,7 @@ public static class CliApp
                 Text = parseResult.GetValue(query) ?? string.Empty,
                 Filter = filters.Build(parseResult, limit: 0, SessionSortOrder.Recent),
                 Top = requestedTop > 0 ? requestedTop : config.Search.DefaultTop,
-                SnippetsPerSession = requestedSnippets > 0 ? requestedSnippets : config.Search.SnippetsPerSession,
+                SnippetsPerSession = requestedSnippets ?? config.Search.SnippetsPerSession,
                 Mode = mode,
                 Deep = parseResult.GetValue(deep)
             };
@@ -708,32 +827,14 @@ public static class CliApp
                 return 0;
             }
 
-            var startInfo = new ProcessStartInfo(resume.Executable) { UseShellExecute = false };
-            foreach (var argument in resume.Arguments)
-            {
-                startInfo.ArgumentList.Add(argument);
-            }
-
-            if (resume.WorkingDirectory is { Length: > 0 } directory && Directory.Exists(directory))
-            {
-                startInfo.WorkingDirectory = directory;
-            }
-
+            var startInfo = ResumeLauncher.Build(resume);
             stderr.WriteLine(ConsoleStyle.Dim($"Running: {resume.DisplayCommand}"));
-
-            try
+            if (startInfo.WorkingDirectory is { Length: > 0 } cwd)
             {
-                using var process = Process.Start(startInfo)
-                    ?? throw new RetraceException($"Could not start '{resume.Executable}'.");
+                stderr.WriteLine(ConsoleStyle.Dim($"     in: {cwd}"));
+            }
 
-                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-                return process.ExitCode;
-            }
-            catch (System.ComponentModel.Win32Exception ex)
-            {
-                throw new RetraceException(
-                    $"Could not run '{resume.Executable}': {ex.Message}. Is it installed and on PATH?", ex);
-            }
+            return await ResumeLauncher.RunAsync(resume, cancellationToken).ConfigureAwait(false);
         });
 
         return command;

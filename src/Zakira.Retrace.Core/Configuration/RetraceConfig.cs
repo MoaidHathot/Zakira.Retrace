@@ -40,6 +40,10 @@ public sealed class RetraceConfig
     /// <summary>Console rendering defaults.</summary>
     [JsonPropertyName("output")]
     public OutputConfig Output { get; set; } = new();
+
+    /// <summary>Interactive browser (<c>retrace tui</c>) defaults.</summary>
+    [JsonPropertyName("tui")]
+    public TuiConfig Tui { get; set; } = new();
 }
 
 /// <summary>Per-source settings, keyed by the source ids used everywhere else.</summary>
@@ -56,6 +60,36 @@ public sealed class SourcesConfig
     /// <summary>GitHub Copilot Chat inside VS Code.</summary>
     [JsonPropertyName("copilot-vscode")]
     public CopilotVsCodeSourceConfig CopilotVsCode { get; set; } = new();
+
+    /// <summary>
+    /// Looks up the settings block for a source id, or <see langword="null"/> for a source this
+    /// configuration knows nothing about.
+    /// </summary>
+    /// <remarks>
+    /// This is the one place that maps ids to typed blocks. Every policy question — is it enabled,
+    /// is it indexed by default — goes through here, so adding a source means adding a case here
+    /// rather than hunting down a switch in each consumer.
+    /// </remarks>
+    public SourceConfigBase? Get(string sourceId) => sourceId?.ToLowerInvariant() switch
+    {
+        "opencode" => OpenCode,
+        "copilot-cli" => CopilotCli,
+        "copilot-vscode" => CopilotVsCode,
+        _ => null
+    };
+
+    /// <summary>Whether a source participates at all. Unknown sources are treated as enabled.</summary>
+    public bool IsEnabled(string sourceId) => Get(sourceId)?.Enabled ?? true;
+
+    /// <summary>
+    /// Whether an unscoped <c>index build</c>/<c>refresh</c> and the inline top-up should include a
+    /// source. Always <see langword="false"/> for a disabled source.
+    /// </summary>
+    public bool IsIndexedByDefault(string sourceId)
+    {
+        var block = Get(sourceId);
+        return block is null || (block.Enabled && block.IndexByDefault);
+    }
 }
 
 /// <summary>Settings shared by every source.</summary>
@@ -67,8 +101,29 @@ public abstract class SourceConfigBase
     /// without this the generated file would bury `enabled` under each source's specific options.
     /// </remarks>
     [JsonPropertyName("enabled")]
-    [JsonPropertyOrder(-2)]
+    [JsonPropertyOrder(-3)]
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether <c>retrace index build</c> and <c>retrace index refresh</c> include this source when
+    /// no <c>--source</c> is given, and whether the automatic inline top-up considers it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the answer to "I want this harness available, but I do not want every refresh to
+    /// pay for it". A source used mostly by automation can produce thousands of sessions nobody
+    /// will ever search, and reading each one dominates the cost of a build. Turning this off keeps
+    /// the source fully usable — listing, <c>show</c>, <c>resume</c>, and whatever is already in the
+    /// index all still work — while taking it out of the default indexing path.
+    /// </para>
+    /// <para>
+    /// Naming the source explicitly, <c>retrace index build --source copilot-cli</c>, indexes it
+    /// regardless. The flag changes the default, not what is possible.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("indexByDefault")]
+    [JsonPropertyOrder(-2)]
+    public bool IndexByDefault { get; set; } = true;
 
     /// <summary>
     /// Override the harness's data directory. <see langword="null"/> means auto-detect from the
@@ -363,4 +418,35 @@ public sealed class OutputConfig
     /// <summary>Characters of preview text shown per row in list and search output.</summary>
     [JsonPropertyName("previewCharacters")]
     public int PreviewCharacters { get; set; } = 120;
+}
+
+/// <summary>Interactive browser (<c>retrace tui</c>) defaults.</summary>
+public sealed class TuiConfig
+{
+    /// <summary>Capture mouse wheel and clicks. Turn off to keep the terminal's native text selection.</summary>
+    [JsonPropertyName("mouse")]
+    public bool Mouse { get; set; } = true;
+
+    /// <summary>
+    /// Character budget for the transcript loaded into the preview and reader panes. The full
+    /// conversation is read in pages when you scroll past it. <c>0</c> means unbounded.
+    /// </summary>
+    [JsonPropertyName("previewMaxCharacters")]
+    public int PreviewMaxCharacters { get; set; } = 60000;
+
+    /// <summary>Show captured tool output in the reader. Toggle at runtime with <c>x</c>.</summary>
+    [JsonPropertyName("showToolOutput")]
+    public bool ShowToolOutput { get; set; }
+
+    /// <summary>Show model reasoning in the reader. Toggle at runtime with <c>z</c>.</summary>
+    [JsonPropertyName("showReasoning")]
+    public bool ShowReasoning { get; set; }
+
+    /// <summary>Sessions fetched for the browse list when no query is typed.</summary>
+    [JsonPropertyName("listLimit")]
+    public int ListLimit { get; set; } = 200;
+
+    /// <summary>Results fetched per search.</summary>
+    [JsonPropertyName("searchLimit")]
+    public int SearchLimit { get; set; } = 50;
 }

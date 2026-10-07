@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Zakira.Retrace.Tui</RootNamespace>
+    <AssemblyName>Zakira.Retrace.Tui</AssemblyName>
+    <!--
+      CA1416 : platform compatibility. The Win32 and termios P/Invokes below are guarded by
+               OperatingSystem.IsWindows() checks at every call site.
+      CA5392 : DefaultDllImportSearchPaths on P/Invokes. kernel32 and libc are system libraries
+               resolved by the loader; the attribute adds nothing for them.
+      CA1060 : move P/Invokes to a NativeMethods class. They are private to the two files that use them.
+      CA1707 : underscores in identifiers, used for the Win32 struct fields that mirror the C names.
+    -->
+    <NoWarn>$(NoWarn);CA1416;CA5392;CA1060;CA1707;SYSLIB1054</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Zakira.Retrace.Abstractions\Zakira.Retrace.Abstractions.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Core\Zakira.Retrace.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Zakira.Retrace.Tui.UnitTests" />
+  </ItemGroup>
+
+</Project>

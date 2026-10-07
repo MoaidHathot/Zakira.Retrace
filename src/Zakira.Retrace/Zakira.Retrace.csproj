@@ -33,6 +33,7 @@
     <ProjectReference Include="..\Zakira.Retrace.Sources.OpenCode\Zakira.Retrace.Sources.OpenCode.csproj" />
     <ProjectReference Include="..\Zakira.Retrace.Sources.CopilotCli\Zakira.Retrace.Sources.CopilotCli.csproj" />
     <ProjectReference Include="..\Zakira.Retrace.Sources.CopilotVsCode\Zakira.Retrace.Sources.CopilotVsCode.csproj" />
+    <ProjectReference Include="..\Zakira.Retrace.Tui\Zakira.Retrace.Tui.csproj" />
   </ItemGroup>
 
   <ItemGroup>
