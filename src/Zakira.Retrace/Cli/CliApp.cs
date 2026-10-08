@@ -74,11 +74,18 @@ public static class CliApp
         root.Subcommands.Add(BuildConfigCommand(host, stdout));
         root.Subcommands.Add(BuildMcpCommand(host, stderr));
 
-        root.SetAction(parseResult =>
+        root.SetAction(async (parseResult, cancellationToken) =>
         {
+            // A person at a terminal typing just `retrace` wants the browser. A script or an agent
+            // with redirected streams gets the pointer to --help and a non-zero exit, as before.
+            if (HasInteractiveTerminal())
+            {
+                return await RunBrowserAsync(host, stdout, stderr, query: null, SessionFilter.All, PickKind.None, noMouse: false, cancellationToken).ConfigureAwait(false);
+            }
+
             stderr.WriteLine(parseResult.CommandResult.Command.Description);
             stderr.WriteLine();
-            stderr.WriteLine("Run 'retrace tui' to browse sessions interactively, or 'retrace --help' to see every command.");
+            stderr.WriteLine("Run 'retrace' in a terminal to browse sessions interactively, or 'retrace --help' to see every command.");
             return 1;
         });
 
@@ -104,7 +111,7 @@ public static class CliApp
 
         var noMouse = new Option<bool>("--no-mouse") { Description = "Leave the mouse to the terminal, so native text selection keeps working." };
 
-        var command = new Command("tui", "Browse, search, read, and resume sessions interactively.");
+        var command = new Command("tui", "Browse, search, read, and resume sessions interactively. Also what a bare `retrace` opens.");
         command.Aliases.Add("ui");
         command.Aliases.Add("browse");
         command.Arguments.Add(query);
@@ -124,68 +131,94 @@ public static class CliApp
                 var other => throw new RetraceException($"Unknown --pick value '{other}'. Use uri, id, dir, or command.")
             };
 
-            if (Console.IsInputRedirected || (Console.IsOutputRedirected && Console.IsErrorRedirected))
+            if (!HasInteractiveTerminal())
             {
                 throw new RetraceException(
                     "The interactive browser requires a terminal. Use `retrace search` and `retrace show` for scripted use, "
                     + "or `retrace tui --pick ...` inside a command substitution so it can draw on stderr.");
             }
 
-            // Built once for the whole session, so the embedding model is loaded a single time
-            // instead of on every keystroke's search.
-            host.LongLived = true;
-
-            var config = await host.GetConfigAsync(cancellationToken).ConfigureAwait(false);
-            var catalog = await host.GetServiceAsync<SessionCatalog>(cancellationToken).ConfigureAwait(false);
-            var tags = await host.GetServiceAsync<TagStore>(cancellationToken).ConfigureAwait(false);
-            var searcher = await host.GetServiceAsync<IndexSearcher>(cancellationToken).ConfigureAwait(false);
-            var embeddings = await host.GetServiceAsync<IEmbeddingProviderFactory>(cancellationToken).ConfigureAwait(false);
-
-            var browserOptions = new BrowserOptions
-            {
-                InitialQuery = parseResult.GetValue(query),
-                Filter = filters.Build(parseResult, limit: 0, SessionSortOrder.Recent),
-                Pick = pickKind,
-                SearchMode = ParseSearchMode(config.Search.Mode),
-                Mouse = config.Tui.Mouse && !parseResult.GetValue(noMouse),
-                PreviewMaxCharacters = config.Tui.PreviewMaxCharacters,
-                ShowToolOutput = config.Tui.ShowToolOutput,
-                ShowReasoning = config.Tui.ShowReasoning,
-                ListLimit = config.Tui.ListLimit,
-                SearchLimit = config.Tui.SearchLimit,
-                RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase),
-                ColorDepth = TerminalScreen.ParseColorDepth(config.Tui.ColorDepth),
-                Version = RetraceVersion.Current
-            };
-
-            BrowserResult outcome;
-            using (var browser = new SessionBrowser(new CatalogBrowserBackend(catalog, tags, searcher, embeddings, config), browserOptions))
-            {
-                outcome = browser.Run(cancellationToken);
-            }
-
-            switch (outcome.Exit)
-            {
-                case BrowserExit.Resume when outcome.Resume is { } resume:
-                    stderr.WriteLine(ConsoleStyle.Dim($"Resuming {outcome.Session?.Ref.Uri}"));
-                    stderr.WriteLine(ConsoleStyle.Dim($"Running: {resume.DisplayCommand}"));
-                    if (resume.WorkingDirectory is { Length: > 0 } cwd)
-                    {
-                        stderr.WriteLine(ConsoleStyle.Dim($"     in: {cwd}"));
-                    }
-
-                    return await ResumeLauncher.RunAsync(resume, cancellationToken).ConfigureAwait(false);
-
-                case BrowserExit.Print when outcome.Output is { } output:
-                    stdout.WriteLine(output);
-                    return 0;
-
-                default:
-                    return 0;
-            }
+            return await RunBrowserAsync(
+                host,
+                stdout,
+                stderr,
+                parseResult.GetValue(query),
+                filters.Build(parseResult, limit: 0, SessionSortOrder.Recent),
+                pickKind,
+                parseResult.GetValue(noMouse),
+                cancellationToken).ConfigureAwait(false);
         });
 
         return command;
+    }
+
+    /// <summary>Stdin is a terminal and at least one of stdout or stderr is, which is all the browser needs to draw.</summary>
+    private static bool HasInteractiveTerminal() =>
+        !Console.IsInputRedirected && !(Console.IsOutputRedirected && Console.IsErrorRedirected);
+
+    /// <summary>Runs the browser and carries out whatever it chose once the terminal is restored.</summary>
+    private static async Task<int> RunBrowserAsync(
+        RetraceHost host,
+        TextWriter stdout,
+        TextWriter stderr,
+        string? query,
+        SessionFilter filter,
+        PickKind pick,
+        bool noMouse,
+        CancellationToken cancellationToken)
+    {
+        // Built once for the whole session, so the embedding model is loaded a single time
+        // instead of on every keystroke's search.
+        host.LongLived = true;
+
+        var config = await host.GetConfigAsync(cancellationToken).ConfigureAwait(false);
+        var catalog = await host.GetServiceAsync<SessionCatalog>(cancellationToken).ConfigureAwait(false);
+        var tags = await host.GetServiceAsync<TagStore>(cancellationToken).ConfigureAwait(false);
+        var searcher = await host.GetServiceAsync<IndexSearcher>(cancellationToken).ConfigureAwait(false);
+        var embeddings = await host.GetServiceAsync<IEmbeddingProviderFactory>(cancellationToken).ConfigureAwait(false);
+
+        var browserOptions = new BrowserOptions
+        {
+            InitialQuery = query,
+            Filter = filter,
+            Pick = pick,
+            SearchMode = ParseSearchMode(config.Search.Mode),
+            Mouse = config.Tui.Mouse && !noMouse,
+            PreviewMaxCharacters = config.Tui.PreviewMaxCharacters,
+            ShowToolOutput = config.Tui.ShowToolOutput,
+            ShowReasoning = config.Tui.ShowReasoning,
+            ListLimit = config.Tui.ListLimit,
+            SearchLimit = config.Tui.SearchLimit,
+            RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase),
+            ColorDepth = TerminalScreen.ParseColorDepth(config.Tui.ColorDepth),
+            Version = RetraceVersion.Current
+        };
+
+        BrowserResult outcome;
+        using (var browser = new SessionBrowser(new CatalogBrowserBackend(catalog, tags, searcher, embeddings, config), browserOptions))
+        {
+            outcome = browser.Run(cancellationToken);
+        }
+
+        switch (outcome.Exit)
+        {
+            case BrowserExit.Resume when outcome.Resume is { } resume:
+                stderr.WriteLine(ConsoleStyle.Dim($"Resuming {outcome.Session?.Ref.Uri}"));
+                stderr.WriteLine(ConsoleStyle.Dim($"Running: {resume.DisplayCommand}"));
+                if (resume.WorkingDirectory is { Length: > 0 } cwd)
+                {
+                    stderr.WriteLine(ConsoleStyle.Dim($"     in: {cwd}"));
+                }
+
+                return await ResumeLauncher.RunAsync(resume, cancellationToken).ConfigureAwait(false);
+
+            case BrowserExit.Print when outcome.Output is { } output:
+                stdout.WriteLine(output);
+                return 0;
+
+            default:
+                return 0;
+        }
     }
 
     // ---- version / info / sources / doctor -------------------------------------------------

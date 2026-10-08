@@ -278,9 +278,13 @@ public sealed class CliEndToEndTests
     {
         using var runner = new RetraceRunner();
 
+        // A bare `retrace` opens the browser for a person at a terminal. The runner redirects every
+        // stream, which is the script-or-agent case, and that must still get a pointer and exit 1
+        // rather than an alternate-screen escape soup.
         var result = await runner.RunAsync();
 
         result.ExitCode.Should().Be(1);
         result.StandardError.Should().Contain("--help");
+        result.StandardOutput.Should().NotContain("\u001b[?1049h");
     }
 }

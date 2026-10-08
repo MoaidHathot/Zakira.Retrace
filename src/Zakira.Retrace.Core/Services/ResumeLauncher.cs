@@ -124,14 +124,24 @@ public static class ResumeLauncher
         var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         var directories = path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        // On Windows the shell tries each PATHEXT extension in order; an explicit extension on the
-        // name is tried first and verbatim. Elsewhere a file is a file.
-        var extensions = OperatingSystem.IsWindows()
-            ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD")
-                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Prepend(string.Empty)
-                .ToArray()
-            : [string.Empty];
+        // On Windows the shell tries each PATHEXT extension in order. A bare name is never run as
+        // is: npm installs an extensionless POSIX shim next to every `.cmd` shim, and picking that
+        // one up gives "not a valid application for this OS platform". A name that already carries
+        // an extension is looked up verbatim. Elsewhere a file is a file.
+        string[] extensions;
+        if (!OperatingSystem.IsWindows())
+        {
+            extensions = [string.Empty];
+        }
+        else if (Path.HasExtension(executable))
+        {
+            extensions = [string.Empty];
+        }
+        else
+        {
+            extensions = (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD")
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        }
 
         foreach (var directory in directories)
         {

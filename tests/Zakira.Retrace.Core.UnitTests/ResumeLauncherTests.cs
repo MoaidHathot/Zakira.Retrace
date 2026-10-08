@@ -47,10 +47,16 @@ public sealed class ResumeLauncherTests
         var shim = Path.Combine(temp.Path, "opencode.cmd");
         File.WriteAllText(shim, "@echo off");
 
+        // npm also drops an extensionless POSIX shell shim next to the .cmd one. It must never be
+        // the one picked: CreateProcess rejects it as "not a valid application for this OS platform".
+        File.WriteAllText(Path.Combine(temp.Path, "opencode"), "#!/bin/sh");
+
         var original = Environment.GetEnvironmentVariable("PATH");
         try
         {
             Environment.SetEnvironmentVariable("PATH", temp.Path + Path.PathSeparator + original);
+
+            ResumeLauncher.ResolveExecutable("opencode").Should().BeEquivalentTo(shim);
 
             var startInfo = ResumeLauncher.Build(Command("opencode", temp.Path));
 
@@ -60,6 +66,31 @@ public sealed class ResumeLauncherTests
             startInfo.Arguments.Should().BeEquivalentTo($"/d /s /c \"\"{shim}\" --session ses_123\"");
             startInfo.WorkingDirectory.Should().Be(temp.Path);
             startInfo.UseShellExecute.Should().BeFalse();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", original);
+        }
+    }
+
+    [Fact]
+    public void ResolveExecutable_uses_an_explicit_extension_verbatim_on_Windows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("PATHEXT semantics only apply on Windows.");
+        }
+
+        using var temp = new TempDirectory();
+        var shim = Path.Combine(temp.Path, "tool.cmd");
+        File.WriteAllText(shim, "@echo off");
+
+        var original = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", temp.Path + Path.PathSeparator + original);
+
+            ResumeLauncher.ResolveExecutable("tool.cmd").Should().BeEquivalentTo(shim);
         }
         finally
         {

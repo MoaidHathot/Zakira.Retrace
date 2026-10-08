@@ -12,7 +12,7 @@ Everything is local. No account, no API key, no network at query time, no backgr
 dotnet tool install -g Zakira.Retrace
 retrace index build
 retrace search "how did I set up the retry policy"
-retrace tui                       # or browse interactively
+retrace                           # or just browse: a bare retrace opens the TUI
 ```
 
 Or without installing anything:
@@ -52,7 +52,7 @@ of what is possible; the alternative would be a command that looks like it worke
 ## Commands
 
 ```
-retrace tui [query]             Browse, search, read, and resume interactively
+retrace [tui] [query]           Browse, search, read, and resume interactively (the default)
 retrace sources                 List sources and whether each is readable
 retrace doctor                  Check config, sources, index, and models
 retrace info                    Resolved paths, model, and search settings
@@ -73,9 +73,10 @@ retrace mcp serve               Run as an MCP server
 
 ## The browser
 
-`retrace tui` is the fast path from "I remember doing this" to sitting in that session again. It
-is a full-screen, keyboard-driven browser in the lazygit mould: a search box that queries as you
-type, a session list, a preview pane, and a reader — with the actions you would otherwise chain
+`retrace` on its own (or `retrace tui [query]`) is the fast path from "I remember doing this" to
+sitting in that session again. It is a full-screen, keyboard-driven browser in the lazygit mould: a
+search box that queries as you type, a session list, a preview pane, and a reader — with the actions
+you would otherwise chain
 three commands together for bound to single keys.
 
 ```
