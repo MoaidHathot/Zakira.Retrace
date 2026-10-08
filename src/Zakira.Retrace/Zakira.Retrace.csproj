@@ -18,7 +18,7 @@
     <PackageId>Zakira.Retrace</PackageId>
     <Description>Search, read, and resume AI coding sessions across harnesses. Indexes OpenCode, GitHub Copilot CLI, and Copilot in VS Code into one local hybrid (BM25 + local ONNX embeddings) search index. Ships as a CLI (`retrace`), an interactive terminal browser (`retrace tui`), and an MCP server (`retrace mcp serve`) in one .NET 10 binary.</Description>
     <PackageTags>ai;agent;sessions;search;mcp;cli;tui;dotnet-tool;opencode;copilot;zakira</PackageTags>
-    <PackageReleaseNotes>0.3.0 — Search is much faster: short tokens no longer prefix-expand (typing "re" took minutes on a large index), snippets are fetched in one query, and `retrace tui` keeps the embedding model warm, tops the index up in the background, and runs one search at a time. The browser was restyled: 24-bit palette with 256/16-colour fallbacks, NO_COLOR support, and `tui.colorDepth`.</PackageReleaseNotes>
+    <PackageReleaseNotes>0.3.1 — A bare etrace opens the interactive browser. Resuming from the browser (and esume --exec) now works with npm-installed harnesses on Windows: the launcher no longer picks up npm's extensionless shell shim ahead of the .cmd one.</PackageReleaseNotes>
     <!--
       LatestMajor lets the tool run on a newer runtime than it was built against, which is
       what makes `dnx Zakira.Retrace ...` work on a machine that only has a later SDK.
