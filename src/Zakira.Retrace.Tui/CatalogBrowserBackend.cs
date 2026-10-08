@@ -1,12 +1,18 @@
 using Zakira.Retrace.Abstractions;
 using Zakira.Retrace.Core.Configuration;
+using Zakira.Retrace.Core.Embeddings;
 using Zakira.Retrace.Core.Index;
 using Zakira.Retrace.Core.Services;
 
 namespace Zakira.Retrace.Tui;
 
 /// <summary>The real backend: <see cref="SessionCatalog"/>, <see cref="TagStore"/>, and <see cref="IndexSearcher"/> behind <see cref="IBrowserBackend"/>.</summary>
-public sealed class CatalogBrowserBackend(SessionCatalog catalog, TagStore tags, IndexSearcher searcher, RetraceConfig config) : IBrowserBackend
+public sealed class CatalogBrowserBackend(
+    SessionCatalog catalog,
+    TagStore tags,
+    IndexSearcher searcher,
+    IEmbeddingProviderFactory embeddings,
+    RetraceConfig config) : IBrowserBackend
 {
     /// <inheritdoc />
     public IReadOnlyList<string> SourceIds => [.. catalog.Sources.Select(source => source.Id)];
@@ -20,9 +26,11 @@ public sealed class CatalogBrowserBackend(SessionCatalog catalog, TagStore tags,
     /// <inheritdoc />
     public async Task<IReadOnlyList<SessionSummary>> ListAsync(SessionFilter filter, CancellationToken cancellationToken)
     {
+        // IndexOnly: the browser runs the top-up itself, in the background, so a keystroke never
+        // waits behind indexing work.
         try
         {
-            return await catalog.ListAsync(filter, QueryMode.Indexed, cancellationToken).ConfigureAwait(false);
+            return await catalog.ListAsync(filter, QueryMode.IndexOnly, cancellationToken).ConfigureAwait(false);
         }
         catch (IndexNotBuiltException)
         {
@@ -32,7 +40,7 @@ public sealed class CatalogBrowserBackend(SessionCatalog catalog, TagStore tags,
 
     /// <inheritdoc />
     public Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, CancellationToken cancellationToken) =>
-        catalog.SearchAsync(query, QueryMode.Indexed, cancellationToken);
+        catalog.SearchAsync(query, QueryMode.IndexOnly, cancellationToken);
 
     /// <inheritdoc />
     public Task<SessionTranscript> GetTranscriptAsync(SessionRef session, TranscriptOptions options, CancellationToken cancellationToken) =>
@@ -70,4 +78,24 @@ public sealed class CatalogBrowserBackend(SessionCatalog catalog, TagStore tags,
                 Progress = progress
             },
             cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> TopUpIndexAsync(IProgress<IndexProgress> progress, CancellationToken cancellationToken) =>
+        catalog.TopUpIfStaleAsync(progress, cancellationToken);
+
+    /// <inheritdoc />
+    public Task WarmUpAsync(CancellationToken cancellationToken) =>
+        embeddings is CachingEmbeddingProviderFactory caching ? caching.WarmUpAsync(cancellationToken) : Task.CompletedTask;
+
+    /// <inheritdoc />
+    public async Task<IndexInfo> GetIndexInfoAsync(CancellationToken cancellationToken)
+    {
+        if (!searcher.Exists)
+        {
+            return new IndexInfo(false, 0, null, false);
+        }
+
+        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        return new IndexInfo(true, status.SessionCount, status.EmbeddingModel, config.Embeddings.Enabled && embeddings.IsAvailable);
+    }
 }

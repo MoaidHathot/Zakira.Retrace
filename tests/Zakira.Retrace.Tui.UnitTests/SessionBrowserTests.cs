@@ -38,7 +38,7 @@ public sealed class SessionBrowserTests
 
         var screen = browser.Screen;
 
-        screen.Should().Contain("Sessions (3)");
+        screen.Should().Contain("Sessions \u00b7 3");
         screen.Should().Contain("Fix retry logic in HttpClient");
         screen.Should().Contain("Investigate flaky integration test");
         screen.Should().Contain("Write the TUI browser");
@@ -46,7 +46,7 @@ public sealed class SessionBrowserTests
         // The newest session is selected and previewed, transcript included.
         screen.Should().Contain("retrace://opencode/ses_alpha");
         screen.Should().Contain("The retries never back off");
-        screen.Should().Contain("3 session(s)");
+        screen.Should().Contain("3 sessions");
     }
 
     [Fact]
@@ -60,10 +60,10 @@ public sealed class SessionBrowserTests
 
         backend.SearchQueries.Should().Contain("flaky");
         var screen = browser.Screen;
-        screen.Should().Contain("Matches (1)");
+        screen.Should().Contain("Matches \u00b7 1");
         screen.Should().Contain("Investigate flaky integration test");
         screen.Should().NotContain("Fix retry logic");
-        screen.Should().Contain("1 match(es)");
+        screen.Should().Contain("1 match");
     }
 
     [Fact]
@@ -80,6 +80,79 @@ public sealed class SessionBrowserTests
     }
 
     [Fact]
+    public async Task Searches_never_overlap_and_the_latest_text_always_wins()
+    {
+        var backend = NewBackend();
+        backend.Delay = TimeSpan.FromMilliseconds(120);
+        using var browser = await StartAsync(backend);
+
+        // Force the first search to start, then type more while it is in flight.
+        browser.Type("in");
+        browser.ForceDueQueriesForTest();
+        browser.Type("tegration");
+        browser.ForceDueQueriesForTest();
+        browser.Type(" test");
+        await browser.SettleAsync();
+
+        // One search was in flight; the two later edits coalesced into exactly one follow-up
+        // instead of a search per keystroke piling onto the database.
+        backend.SearchQueries.Should().Equal("in", "integration test");
+        backend.MaxConcurrentSearches.Should().Be(1);
+        browser.Screen.Should().Contain("Matches \u00b7 1");
+    }
+
+    [Fact]
+    public async Task The_frame_keeps_animating_while_a_search_is_in_flight()
+    {
+        var backend = NewBackend();
+        backend.Delay = TimeSpan.FromMilliseconds(400);
+        using var browser = await StartAsync(backend);
+
+        browser.Type("flaky");
+        browser.ForceDueQueriesForTest();
+
+        // No key arrives during the wait; the loop alone must mark frames dirty as the spinner turns.
+        var redraws = 0;
+        var deadline = DateTime.UtcNow.AddMilliseconds(330);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (browser.TickForTest())
+            {
+                redraws++;
+            }
+
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        redraws.Should().BeGreaterThanOrEqualTo(3, "the spinner advances every 80 ms whether or not the user types");
+        await browser.SettleAsync();
+    }
+
+    [Fact]
+    public async Task Startup_warms_the_model_and_tops_up_the_index_in_the_background()
+    {
+        var backend = NewBackend();
+        backend.TopUpChanges = true;
+        using var browser = await StartAsync(backend);
+
+        backend.WarmUpCalls.Should().Be(1);
+        backend.TopUpCalls.Should().Be(1);
+        browser.Screen.Should().Contain("index topped up");
+        browser.Screen.Should().Contain("3 indexed", "the header shows the index size once it is known");
+    }
+
+    [Fact]
+    public async Task Startup_skips_the_warm_up_when_semantic_search_is_unavailable()
+    {
+        var backend = NewBackend();
+        backend.SemanticAvailable = false;
+        using var browser = await StartAsync(backend);
+
+        backend.WarmUpCalls.Should().Be(0);
+        browser.Screen.Should().Contain("keyword", "the header says what kind of search will actually run");
+    }
+
+    [Fact]
     public async Task Clearing_the_query_returns_to_the_recent_list()
     {
         var backend = NewBackend();
@@ -90,7 +163,7 @@ public sealed class SessionBrowserTests
         browser.Press(Ctrl('u'));
         await browser.SettleAsync();
 
-        browser.Screen.Should().Contain("Sessions (3)");
+        browser.Screen.Should().Contain("Sessions \u00b7 3");
     }
 
     [Fact]
@@ -107,10 +180,10 @@ public sealed class SessionBrowserTests
         var reader = browser.Screen;
         reader.Should().Contain("Investigate flaky integration test");
         reader.Should().Contain("The test depends on wall-clock time");
-        reader.Should().NotContain("Sessions (3)", "the reader takes the whole screen");
+        reader.Should().NotContain("Sessions \u00b7 3", "the reader takes the whole screen");
 
         browser.Press(Key('q'));
-        browser.Screen.Should().Contain("Sessions (3)");
+        browser.Screen.Should().Contain("Sessions \u00b7 3");
     }
 
     [Fact]
@@ -249,17 +322,17 @@ public sealed class SessionBrowserTests
 
         browser.Press(Key('s'));
         await browser.SettleAsync();
-        browser.Screen.Should().Contain("Sessions (2)");
-        browser.Screen.Should().Contain("source:opencode");
+        browser.Screen.Should().Contain("Sessions \u00b7 2");
+        browser.Screen.Should().Contain("source opencode");
 
         browser.Press(Key('s'));
         await browser.SettleAsync();
-        browser.Screen.Should().Contain("Sessions (1)");
-        browser.Screen.Should().Contain("source:copilot-cli");
+        browser.Screen.Should().Contain("Sessions \u00b7 1");
+        browser.Screen.Should().Contain("source copilot-cli");
 
         browser.Press(Key('s'));
         await browser.SettleAsync();
-        browser.Screen.Should().Contain("Sessions (3)");
+        browser.Screen.Should().Contain("Sessions \u00b7 3");
     }
 
     [Fact]
@@ -277,7 +350,7 @@ public sealed class SessionBrowserTests
         await browser.SettleAsync();
 
         backend.RefreshCalls.Should().Be(1);
-        browser.Screen.Should().Contain("Matches (1)");
+        browser.Screen.Should().Contain("Matches \u00b7 1");
     }
 
     [Fact]
@@ -316,7 +389,7 @@ public sealed class SessionBrowserTests
         using var browser = await StartAsync(backend, width: 80, height: 24);
 
         var screen = browser.Screen;
-        screen.Should().Contain("Sessions (3)");
+        screen.Should().Contain("Sessions \u00b7 3");
         screen.Should().NotContain("Preview");
 
         browser.Press(new KeyEvent(KeyKind.Escape));
@@ -331,7 +404,7 @@ public sealed class SessionBrowserTests
         var backend = NewBackend();
         using var browser = await StartAsync(backend, new BrowserOptions { InitialQuery = "backoff" });
 
-        browser.Screen.Should().Contain("Matches (1)");
+        browser.Screen.Should().Contain("Matches \u00b7 1");
         browser.Screen.Should().Contain("Fix retry logic in HttpClient");
     }
 
@@ -360,8 +433,8 @@ public sealed class SessionBrowserTests
         browser.Type(" nothing-matches-this");
         await browser.SettleAsync();
 
-        browser.Screen.Should().Contain("Matches (0)");
-        browser.Screen.Should().Contain("No matches.");
+        browser.Screen.Should().Contain("Matches \u00b7 0");
+        browser.Screen.Should().Contain("No matches for");
     }
 
     [Fact]

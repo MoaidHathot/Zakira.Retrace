@@ -124,6 +124,14 @@ public sealed class IndexSearcher(
 
         var sessions = await ReadSessionsAsync(connection, top.Select(entry => entry.Key).ToArray(), cancellationToken).ConfigureAwait(false);
 
+        // Snippets are fetched for every surviving hit in one statement. Asking FTS5 once per hit
+        // meant fifty small queries per search, which together cost more than the search itself.
+        var snippetsBySession = await ReadSnippetsAsync(
+            connection,
+            top.Where(entry => sessions.ContainsKey(entry.Key)).Select(entry => (entry.Key, entry.Value.ChunkRowIds)).ToArray(),
+            query,
+            cancellationToken).ConfigureAwait(false);
+
         var hits = new List<SearchHit>(top.Length);
         var now = DateTimeOffset.UtcNow;
         var currentWorkspace = query.Filter.WorkspacePath;
@@ -136,7 +144,6 @@ public sealed class IndexSearcher(
             }
 
             var score = ApplyBoosts(scores.Score, session, now, currentWorkspace);
-            var snippets = await ReadSnippetsAsync(connection, sessionRowId, scores.ChunkRowIds, query, cancellationToken).ConfigureAwait(false);
 
             hits.Add(new SearchHit
             {
@@ -144,7 +151,7 @@ public sealed class IndexSearcher(
                 Score = score,
                 LexicalScore = scores.Lexical,
                 SemanticScore = scores.Semantic,
-                Snippets = snippets
+                Snippets = snippetsBySession.TryGetValue(sessionRowId, out var snippets) ? snippets : []
             });
         }
 
@@ -174,6 +181,26 @@ public sealed class IndexSearcher(
         }
 
         return files;
+    }
+
+    /// <summary>
+    /// When the index was last refreshed, read from a single metadata row.
+    /// </summary>
+    /// <remarks>
+    /// Kept apart from <see cref="GetStatusAsync"/> on purpose. That method aggregates vector
+    /// coverage across every chunk, which on a large index costs several hundred milliseconds —
+    /// far too much to pay just to decide whether a staleness probe is due.
+    /// </remarks>
+    public async Task<DateTimeOffset?> GetLastRefreshAsync(CancellationToken cancellationToken)
+    {
+        if (!Exists)
+        {
+            return null;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        var lastRefresh = await RetraceIndexSchema.GetMetaAsync(connection, RetraceIndexSchema.LastRefreshKey, cancellationToken).ConfigureAwait(false);
+        return long.TryParse(lastRefresh, out var epoch) ? DateTimeOffset.FromUnixTimeMilliseconds(epoch) : null;
     }
 
     /// <summary>Reports index size, freshness, and per-source state.</summary>
@@ -450,23 +477,19 @@ public sealed class IndexSearcher(
         HashSet<long> candidateSessions,
         CancellationToken cancellationToken)
     {
+        var snapshot = await GetCentroidsAsync(connection, cancellationToken).ConfigureAwait(false);
         var scored = new List<(long SessionRowId, float Score)>();
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT session_rowid, vector FROM session_embedding;";
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        for (var index = 0; index < snapshot.RowIds.Length; index++)
         {
-            var sessionRowId = reader.GetInt64(0);
+            var sessionRowId = snapshot.RowIds[index];
             if (!candidateSessions.Contains(sessionRowId))
             {
                 continue;
             }
 
-            var vector = VectorMath.Deserialize((byte[])reader[1]);
             // Both sides are unit length, so the dot product is the cosine and skips two norms.
-            var score = VectorMath.Dot(queryVector, vector);
+            var score = VectorMath.Dot(queryVector, snapshot.Vectors[index]);
             if (score > 0f)
             {
                 scored.Add((sessionRowId, score));
@@ -477,6 +500,76 @@ public sealed class IndexSearcher(
             .OrderByDescending(entry => entry.Score)
             .Take(Math.Max(config.Search.SemanticSessionShortlist, 1))
             .Select(entry => entry.SessionRowId)];
+    }
+
+    /// <summary>One session centroid per row, held in memory for the life of the process.</summary>
+    private sealed record CentroidSnapshot(string Stamp, long[] RowIds, float[][] Vectors);
+
+    private CentroidSnapshot? centroids;
+    private readonly object centroidGate = new();
+
+    /// <summary>
+    /// Returns every session centroid, reading the table only when it has changed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The first semantic tier touches every session vector on every query. Reading and
+    /// deserialising all of them from SQLite costs a few hundred milliseconds on a large index,
+    /// which a one-shot command pays once but an interactive front end would pay per keystroke.
+    /// </para>
+    /// <para>
+    /// The cache is keyed on the row count and the highest row id of <c>session_embedding</c>. A
+    /// session's rows are deleted and re-inserted whenever it is re-indexed, and row ids only ever
+    /// grow, so any change to the table moves one of the two. Checking them is a single indexed
+    /// query, cheap enough to run before every search.
+    /// </para>
+    /// </remarks>
+    private async Task<CentroidSnapshot> GetCentroidsAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        string stamp;
+        await using (var probe = connection.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*), COALESCE(MAX(session_rowid), 0) FROM session_embedding;";
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            stamp = $"{reader.GetInt64(0)}:{reader.GetInt64(1)}";
+        }
+
+        var current = centroids;
+        if (current is not null && current.Stamp == stamp)
+        {
+            return current;
+        }
+
+        // Microsoft.Data.Sqlite executes synchronously under its async surface, so a plain lock
+        // around a synchronous read costs nothing and keeps the type free of disposable state.
+        lock (centroidGate)
+        {
+            current = centroids;
+            if (current is not null && current.Stamp == stamp)
+            {
+                return current;
+            }
+
+            var rowIds = new List<long>();
+            var vectors = new List<float[]>();
+
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "SELECT session_rowid, vector FROM session_embedding;";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    rowIds.Add(reader.GetInt64(0));
+                    vectors.Add(VectorMath.Deserialize((byte[])reader[1]));
+                }
+            }
+
+            current = new CentroidSnapshot(stamp, [.. rowIds], [.. vectors]);
+            centroids = current;
+            return current;
+        }
     }
 
     private static async Task<List<RankedChunk>> RankChunksAsync(
@@ -599,80 +692,119 @@ public sealed class IndexSearcher(
         return boosted;
     }
 
-    private static async Task<IReadOnlyList<SearchSnippet>> ReadSnippetsAsync(
+    /// <summary>
+    /// Reads highlighted excerpts for every hit at once. Returns, per session, the snippets in the
+    /// order of the passages' ranks. Zero <see cref="SearchQuery.SnippetsPerSession"/> means none.
+    /// </summary>
+    private static async Task<Dictionary<long, IReadOnlyList<SearchSnippet>>> ReadSnippetsAsync(
         SqliteConnection connection,
-        long sessionRowId,
-        List<long> chunkRowIds,
+        (long SessionRowId, List<long> ChunkRowIds)[] hits,
         SearchQuery query,
         CancellationToken cancellationToken)
     {
-        if (chunkRowIds.Count == 0)
+        var result = new Dictionary<long, IReadOnlyList<SearchSnippet>>();
+        if (query.SnippetsPerSession <= 0 || hits.Length == 0)
         {
-            return [];
+            return result;
         }
 
-        var wanted = Math.Max(query.SnippetsPerSession, 1);
-        var ids = chunkRowIds.Take(wanted).ToArray();
-        var placeholders = string.Join(",", ids.Select((_, index) => $"$p{index}"));
-        var match = Fts5Query.Build(query.Text);
-
-        var snippets = new List<SearchSnippet>(ids.Length);
-
-        await using var command = connection.CreateCommand();
-
-        // Ask FTS5 for the highlighted excerpt when the query is lexical; fall back to the raw text
-        // for a semantic-only hit, where there is no term to highlight.
-        if (match.Length > 0)
+        // Which chunk ids are wanted, and where each one ranks within its session, so the output
+        // order survives the set-shaped query.
+        var order = new Dictionary<long, (long SessionRowId, int Rank)>();
+        foreach (var (sessionRowId, chunkRowIds) in hits)
         {
-            command.CommandText = $"""
-                SELECT c.role, c.turn_index, c.timestamp_utc, c.text,
-                       snippet(chunk_fts, 0, '<<', '>>', '…', 20) AS excerpt
-                FROM chunk c
-                JOIN chunk_fts ON chunk_fts.rowid = c.rowid AND chunk_fts MATCH $match
-                WHERE c.rowid IN ({placeholders});
-                """;
-            command.Parameters.AddWithValue("$match", match);
-        }
-        else
-        {
-            command.CommandText = $"""
-                SELECT c.role, c.turn_index, c.timestamp_utc, c.text, NULL AS excerpt
-                FROM chunk c
-                WHERE c.rowid IN ({placeholders});
-                """;
-        }
-
-        for (var index = 0; index < ids.Length; index++)
-        {
-            command.Parameters.AddWithValue($"$p{index}", ids[index]);
-        }
-
-        try
-        {
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            var rank = 0;
+            foreach (var chunkRowId in chunkRowIds.Take(query.SnippetsPerSession))
             {
-                var highlighted = reader.GetNullableString(4);
-                var text = highlighted is null
-                    ? Text.TextUtilities.Preview(reader.GetString(3), 240)
-                    : highlighted.Replace("<<", string.Empty, StringComparison.Ordinal).Replace(">>", string.Empty, StringComparison.Ordinal);
-
-                snippets.Add(new SearchSnippet
-                {
-                    Role = Enum.TryParse<TurnRole>(reader.GetString(0), out var role) ? role : TurnRole.Assistant,
-                    TurnIndex = reader.GetNullableInt32(1) ?? 0,
-                    Timestamp = reader.GetNullableInt64(2) is { } epoch ? DateTimeOffset.FromUnixTimeMilliseconds(epoch) : null,
-                    Text = text,
-                    Highlighted = highlighted
-                });
+                order.TryAdd(chunkRowId, (sessionRowId, rank++));
             }
         }
-        catch (SqliteException)
+
+        if (order.Count == 0)
         {
-            return [];
+            return result;
         }
 
-        return snippets;
+        var match = Fts5Query.Build(query.Text);
+        var collected = new List<(long SessionRowId, int Rank, SearchSnippet Snippet)>(order.Count);
+
+        // SQLite caps bound parameters at 32,766 but a statement with hundreds of them is slow to
+        // plan; snippets never exceed a few hundred ids, and batching keeps it comfortable anyway.
+        const int batchSize = 200;
+        var ids = order.Keys.ToArray();
+
+        for (var offset = 0; offset < ids.Length; offset += batchSize)
+        {
+            var batch = ids.Skip(offset).Take(batchSize).ToArray();
+            var placeholders = string.Join(",", batch.Select((_, index) => $"$p{index}"));
+
+            await using var command = connection.CreateCommand();
+
+            // Ask FTS5 for the highlighted excerpt when the query is lexical; fall back to the raw
+            // text for a semantic-only hit, where there is no term to highlight.
+            if (match.Length > 0)
+            {
+                command.CommandText = $"""
+                    SELECT c.rowid, c.role, c.turn_index, c.timestamp_utc, c.text,
+                           snippet(chunk_fts, 0, '<<', '>>', '…', 20) AS excerpt
+                    FROM chunk c
+                    JOIN chunk_fts ON chunk_fts.rowid = c.rowid AND chunk_fts MATCH $match
+                    WHERE c.rowid IN ({placeholders});
+                    """;
+                command.Parameters.AddWithValue("$match", match);
+            }
+            else
+            {
+                command.CommandText = $"""
+                    SELECT c.rowid, c.role, c.turn_index, c.timestamp_utc, c.text, NULL AS excerpt
+                    FROM chunk c
+                    WHERE c.rowid IN ({placeholders});
+                    """;
+            }
+
+            for (var index = 0; index < batch.Length; index++)
+            {
+                command.Parameters.AddWithValue($"$p{index}", batch[index]);
+            }
+
+            try
+            {
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var chunkRowId = reader.GetInt64(0);
+                    if (!order.TryGetValue(chunkRowId, out var placement))
+                    {
+                        continue;
+                    }
+
+                    var highlighted = reader.GetNullableString(5);
+                    var text = highlighted is null
+                        ? Text.TextUtilities.Preview(reader.GetString(4), 240)
+                        : highlighted.Replace("<<", string.Empty, StringComparison.Ordinal).Replace(">>", string.Empty, StringComparison.Ordinal);
+
+                    collected.Add((placement.SessionRowId, placement.Rank, new SearchSnippet
+                    {
+                        Role = Enum.TryParse<TurnRole>(reader.GetString(1), out var role) ? role : TurnRole.Assistant,
+                        TurnIndex = reader.GetNullableInt32(2) ?? 0,
+                        Timestamp = reader.GetNullableInt64(3) is { } epoch ? DateTimeOffset.FromUnixTimeMilliseconds(epoch) : null,
+                        Text = text,
+                        Highlighted = highlighted
+                    }));
+                }
+            }
+            catch (SqliteException)
+            {
+                return result;
+            }
+        }
+
+        foreach (var group in collected.GroupBy(entry => entry.SessionRowId))
+        {
+            result[group.Key] = [.. group.OrderBy(entry => entry.Rank).Select(entry => entry.Snippet)];
+        }
+
+        return result;
     }
 
     private static async Task<Dictionary<long, SessionSummary>> ReadSessionsAsync(SqliteConnection connection, long[] rowIds, CancellationToken cancellationToken)

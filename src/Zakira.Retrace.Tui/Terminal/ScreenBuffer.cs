@@ -2,64 +2,6 @@ using System.Text;
 
 namespace Zakira.Retrace.Tui.Terminal;
 
-/// <summary>The 16 ANSI colours plus the terminal's default. Chosen over truecolor so the browser follows the user's terminal theme, as lazygit does.</summary>
-public enum TermColor
-{
-    /// <summary>
-    /// The terminal's default foreground or background. Deliberately zero so that a
-    /// <see langword="default"/> <see cref="Style"/> means "no colour" rather than black.
-    /// </summary>
-    Default = 0,
-
-    /// <summary>ANSI 0.</summary>
-    Black,
-
-    /// <summary>ANSI 1.</summary>
-    Red,
-
-    /// <summary>ANSI 2.</summary>
-    Green,
-
-    /// <summary>ANSI 3.</summary>
-    Yellow,
-
-    /// <summary>ANSI 4.</summary>
-    Blue,
-
-    /// <summary>ANSI 5.</summary>
-    Magenta,
-
-    /// <summary>ANSI 6.</summary>
-    Cyan,
-
-    /// <summary>ANSI 7.</summary>
-    White,
-
-    /// <summary>ANSI 8, the bright black most themes render as grey.</summary>
-    BrightBlack,
-
-    /// <summary>ANSI 9.</summary>
-    BrightRed,
-
-    /// <summary>ANSI 10.</summary>
-    BrightGreen,
-
-    /// <summary>ANSI 11.</summary>
-    BrightYellow,
-
-    /// <summary>ANSI 12.</summary>
-    BrightBlue,
-
-    /// <summary>ANSI 13.</summary>
-    BrightMagenta,
-
-    /// <summary>ANSI 14.</summary>
-    BrightCyan,
-
-    /// <summary>ANSI 15.</summary>
-    BrightWhite
-}
-
 /// <summary>Text attributes.</summary>
 [Flags]
 public enum TermAttr
@@ -87,19 +29,22 @@ public enum TermAttr
 /// <param name="Foreground">Foreground colour.</param>
 /// <param name="Background">Background colour.</param>
 /// <param name="Attributes">Attributes.</param>
-public readonly record struct Style(TermColor Foreground = TermColor.Default, TermColor Background = TermColor.Default, TermAttr Attributes = TermAttr.None)
+public readonly record struct Style(Color Foreground = default, Color Background = default, TermAttr Attributes = TermAttr.None)
 {
     /// <summary>No colour, no attributes.</summary>
     public static Style Plain => default;
 
     /// <summary>Returns this style with a different foreground.</summary>
-    public Style WithFg(TermColor color) => this with { Foreground = color };
+    public Style WithFg(Color color) => this with { Foreground = color };
 
     /// <summary>Returns this style with a different background.</summary>
-    public Style WithBg(TermColor color) => this with { Background = color };
+    public Style WithBg(Color color) => this with { Background = color };
 
     /// <summary>Returns this style with extra attributes.</summary>
     public Style With(TermAttr attributes) => this with { Attributes = Attributes | attributes };
+
+    /// <summary>Returns this style without the given attributes.</summary>
+    public Style Without(TermAttr attributes) => this with { Attributes = Attributes & ~attributes };
 
     /// <summary>Bold variant.</summary>
     public Style Bold() => With(TermAttr.Bold);
@@ -107,8 +52,11 @@ public readonly record struct Style(TermColor Foreground = TermColor.Default, Te
     /// <summary>Dim variant.</summary>
     public Style Dim() => With(TermAttr.Dim);
 
+    /// <summary>Italic variant.</summary>
+    public Style Italic() => With(TermAttr.Italic);
+
     /// <summary>Convenience: a foreground-only style.</summary>
-    public static Style Fg(TermColor color) => new(color);
+    public static Style Fg(Color color) => new(color);
 }
 
 /// <summary>One screen cell: a grapheme (one or more UTF-16 units) and its style.</summary>
@@ -288,6 +236,14 @@ public sealed class ScreenBuffer
         return cursor - column;
     }
 
+    /// <summary>Writes spans so they end at the right edge of a rectangle's row. Returns columns used.</summary>
+    public int WriteSpansRight(Rect rect, int row, IReadOnlyList<StyledSpan> spans, int rightPadding = 0)
+    {
+        var width = spans.Sum(span => TextWidth.Of(span.Text));
+        var start = Math.Max(0, rect.Width - rightPadding - width);
+        return WriteSpans(rect, row, start, spans);
+    }
+
     /// <summary>Restyles every cell on one row of a rectangle; how a selected row is highlighted.</summary>
     public void RestyleRow(Rect rect, int row, Func<Style, Style> transform)
     {
@@ -304,8 +260,24 @@ public sealed class ScreenBuffer
         }
     }
 
-    /// <summary>Draws a single-line box around a rectangle with an optional title in the top border.</summary>
-    public void DrawBox(Rect rect, Style style, string? title = null, Style? titleStyle = null, bool rounded = true)
+    /// <summary>Restyles every cell in a rectangle.</summary>
+    public void Restyle(Rect rect, Func<Style, Style> transform)
+    {
+        var clipped = Clip(rect);
+        for (var row = clipped.Top; row < clipped.Bottom; row++)
+        {
+            for (var column = clipped.Left; column < clipped.Right; column++)
+            {
+                cells[row, column].Style = transform(cells[row, column].Style);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Draws a single-line box around a rectangle, with optional titles set into the top border
+    /// on the left and the right.
+    /// </summary>
+    public void DrawBox(Rect rect, Style style, IReadOnlyList<StyledSpan>? title = null, IReadOnlyList<StyledSpan>? rightTitle = null, bool rounded = true)
     {
         if (rect.Width < 2 || rect.Height < 2)
         {
@@ -331,15 +303,44 @@ public sealed class ScreenBuffer
             Write(row, rect.Right - 1, "\u2502", style);
         }
 
-        if (!string.IsNullOrEmpty(title) && rect.Width > 6)
+        var topRow = new Rect(rect.Left, rect.Top, rect.Width, 1);
+        var used = 0;
+
+        if (title is { Count: > 0 } && rect.Width > 6)
         {
-            var label = " " + TextWidth.Clip(title, rect.Width - 6) + " ";
-            Write(rect.Top, rect.Left + 2, label, titleStyle ?? style);
+            var padded = new List<StyledSpan>(title.Count + 2) { new(" ", style) };
+            padded.AddRange(title);
+            padded.Add(new StyledSpan(" ", style));
+            used = WriteSpans(topRow, 0, 2, Clip(padded, rect.Width - 4));
+        }
+
+        if (rightTitle is { Count: > 0 } && rect.Width - used > 10)
+        {
+            var padded = new List<StyledSpan>(rightTitle.Count + 2) { new(" ", style) };
+            padded.AddRange(rightTitle);
+            padded.Add(new StyledSpan(" ", style));
+            WriteSpansRight(topRow, 0, Clip(padded, rect.Width - used - 6), rightPadding: 2);
         }
     }
 
+    /// <summary>Draws a plain-text titled box; the common case.</summary>
+    public void DrawBox(Rect rect, Style style, string? title, Style? titleStyle = null, bool rounded = true) =>
+        DrawBox(rect, style, title is null ? null : [new StyledSpan(title, titleStyle ?? style)], null, rounded);
+
+    /// <summary>
+    /// Darkens the cells one column right of and one row below a rectangle, so an overlay reads as
+    /// floating above the content rather than cut into it.
+    /// </summary>
+    public void DrawShadow(Rect rect, Color shadow)
+    {
+        Style Shade(Style style) => new(style.Foreground, shadow, style.Attributes | TermAttr.Dim);
+
+        Restyle(new Rect(rect.Right, rect.Top + 1, 1, rect.Height), Shade);
+        Restyle(new Rect(rect.Left + 1, rect.Bottom, rect.Width, 1), Shade);
+    }
+
     /// <summary>Draws a vertical scrollbar in the given one-column rectangle.</summary>
-    public void DrawScrollbar(Rect track, int totalLines, int visibleLines, int firstLine, Style style)
+    public void DrawScrollbar(Rect track, int totalLines, int visibleLines, int firstLine, Style trackStyle, Style thumbStyle)
     {
         if (track.Height <= 0 || totalLines <= visibleLines)
         {
@@ -353,12 +354,12 @@ public sealed class ScreenBuffer
         for (var row = 0; row < track.Height; row++)
         {
             var inThumb = row >= thumbStart && row < thumbStart + thumbSize;
-            Write(track.Top + row, track.Left, inThumb ? "\u2588" : "\u2502", inThumb ? style : style.Dim());
+            Write(track.Top + row, track.Left, inThumb ? "\u2503" : "\u2502", inThumb ? thumbStyle : trackStyle);
         }
     }
 
     /// <summary>Renders every row to an ANSI string (cursor positioning included) for the terminal.</summary>
-    public string[] RenderRows()
+    public string[] RenderRows(ColorDepth depth = ColorDepth.TrueColor)
     {
         var rows = new string[Height];
         var builder = new StringBuilder(Width * 4);
@@ -380,7 +381,7 @@ public sealed class ScreenBuffer
 
                 if (current != cell.Style)
                 {
-                    AppendSgr(builder, cell.Style);
+                    AppendSgr(builder, cell.Style, depth);
                     current = cell.Style;
                 }
 
@@ -435,7 +436,28 @@ public sealed class ScreenBuffer
         return new Rect(left, top, Math.Max(0, right - left), Math.Max(0, bottom - top));
     }
 
-    private static void AppendSgr(StringBuilder builder, Style style)
+    private static List<StyledSpan> Clip(List<StyledSpan> spans, int maxWidth)
+    {
+        var result = new List<StyledSpan>(spans.Count);
+        var used = 0;
+        foreach (var span in spans)
+        {
+            var width = TextWidth.Of(span.Text);
+            if (used + width <= maxWidth)
+            {
+                result.Add(span);
+                used += width;
+                continue;
+            }
+
+            result.Add(new StyledSpan(TextWidth.Clip(span.Text, Math.Max(0, maxWidth - used)), span.Style));
+            break;
+        }
+
+        return result;
+    }
+
+    private static void AppendSgr(StringBuilder builder, Style style, ColorDepth depth)
     {
         builder.Append("\u001b[0");
 
@@ -464,19 +486,39 @@ public sealed class ScreenBuffer
             builder.Append(";7");
         }
 
-        if (style.Foreground != TermColor.Default)
+        if (depth != ColorDepth.None)
         {
-            var code = (int)style.Foreground - 1;
-            builder.Append(';').Append(code < 8 ? 30 + code : 90 + (code - 8));
-        }
-
-        if (style.Background != TermColor.Default)
-        {
-            var code = (int)style.Background - 1;
-            builder.Append(';').Append(code < 8 ? 40 + code : 100 + (code - 8));
+            AppendColor(builder, style.Foreground, background: false, depth);
+            AppendColor(builder, style.Background, background: true, depth);
         }
 
         builder.Append('m');
+    }
+
+    private static void AppendColor(StringBuilder builder, Color color, bool background, ColorDepth depth)
+    {
+        if (color.IsDefault)
+        {
+            return;
+        }
+
+        if (color.IsRgb && depth == ColorDepth.TrueColor)
+        {
+            builder.Append(background ? ";48;2;" : ";38;2;").Append(color.R).Append(';').Append(color.G).Append(';').Append(color.B);
+            return;
+        }
+
+        if (color.IsRgb && depth == ColorDepth.Ansi256)
+        {
+            builder.Append(background ? ";48;5;" : ";38;5;").Append(color.ToAnsi256());
+            return;
+        }
+
+        var code = (int)color.Ansi;
+        var sgr = code < 8
+            ? (background ? 40 : 30) + code
+            : (background ? 100 : 90) + (code - 8);
+        builder.Append(';').Append(sgr);
     }
 }
 

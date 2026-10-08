@@ -239,6 +239,12 @@
           "default": true,
           "description": "Capture mouse wheel and clicks. Turn off to keep the terminal's native text selection."
         },
+        "colorDepth": {
+          "type": "string",
+          "enum": ["auto", "truecolor", "256", "16", "none"],
+          "default": "auto",
+          "description": "Colours to render with. auto detects from COLORTERM, TERM, and the terminal program; truecolor is used on Windows Terminal, modern conhost, and any terminal that advertises it."
+        },
         "previewMaxCharacters": {
           "type": "integer",
           "minimum": 0,

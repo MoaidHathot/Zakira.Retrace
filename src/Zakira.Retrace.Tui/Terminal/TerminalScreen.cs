@@ -30,8 +30,9 @@ public sealed class TerminalScreen : IDisposable
 
     /// <summary>Opens the terminal for full-screen drawing.</summary>
     /// <param name="mouse">Whether to capture mouse wheel and clicks.</param>
+    /// <param name="depth">Colour depth to render with, or null to detect it from the environment.</param>
     /// <exception cref="InvalidOperationException">Neither stdout nor stderr is a terminal.</exception>
-    public TerminalScreen(bool mouse)
+    public TerminalScreen(bool mouse, ColorDepth? depth = null)
     {
         if (Console.IsInputRedirected || (Console.IsOutputRedirected && Console.IsErrorRedirected))
         {
@@ -39,6 +40,7 @@ public sealed class TerminalScreen : IDisposable
         }
 
         this.mouse = mouse;
+        Depth = depth ?? DetectColorDepth();
         WritesToStderr = Console.IsOutputRedirected;
         output = WritesToStderr ? Console.OpenStandardError() : Console.OpenStandardOutput();
 
@@ -68,6 +70,80 @@ public sealed class TerminalScreen : IDisposable
 
     /// <summary>Creates a headless screen of a fixed size for tests. Performs no terminal I/O.</summary>
     public static TerminalScreen CreateHeadless(int width, int height) => new(width, height);
+
+    /// <summary>Colour depth frames are rendered with.</summary>
+    public ColorDepth Depth { get; } = ColorDepth.TrueColor;
+
+    /// <summary>
+    /// Works out how many colours the terminal can show from the environment it advertises.
+    /// </summary>
+    /// <remarks>
+    /// <c>NO_COLOR</c> wins outright. After that the checks go from most to least specific:
+    /// <c>COLORTERM</c> is the explicit truecolor signal; Windows Terminal, VS Code, iTerm2,
+    /// WezTerm, kitty, Ghostty, and Hyper all render 24-bit colour but not all set it; modern
+    /// conhost does too. A <c>TERM</c> ending in <c>256color</c> gets the palette, and anything
+    /// else the basic sixteen.
+    /// </remarks>
+    public static ColorDepth DetectColorDepth()
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("NO_COLOR")))
+        {
+            return ColorDepth.None;
+        }
+
+        var term = Environment.GetEnvironmentVariable("TERM") ?? string.Empty;
+        if (term.Equals("dumb", StringComparison.OrdinalIgnoreCase))
+        {
+            return ColorDepth.None;
+        }
+
+        var colorTerm = Environment.GetEnvironmentVariable("COLORTERM") ?? string.Empty;
+        if (colorTerm.Contains("truecolor", StringComparison.OrdinalIgnoreCase) || colorTerm.Contains("24bit", StringComparison.OrdinalIgnoreCase))
+        {
+            return ColorDepth.TrueColor;
+        }
+
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("KITTY_WINDOW_ID"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEZTERM_PANE"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GHOSTTY_RESOURCES_DIR")))
+        {
+            return ColorDepth.TrueColor;
+        }
+
+        var program = Environment.GetEnvironmentVariable("TERM_PROGRAM") ?? string.Empty;
+        if (program is "vscode" or "iTerm.app" or "WezTerm" or "Hyper" or "ghostty" or "Tabby" or "rio")
+        {
+            return ColorDepth.TrueColor;
+        }
+
+        if (program == "Apple_Terminal")
+        {
+            return ColorDepth.Ansi256;
+        }
+
+        if (OperatingSystem.IsWindows() && Environment.OSVersion.Version >= new Version(10, 0, 15063))
+        {
+            return ColorDepth.TrueColor;
+        }
+
+        if (term.Contains("256color", StringComparison.OrdinalIgnoreCase) || term.Contains("direct", StringComparison.OrdinalIgnoreCase))
+        {
+            return ColorDepth.Ansi256;
+        }
+
+        return ColorDepth.Ansi16;
+    }
+
+    /// <summary>Parses a configured depth name: <c>auto</c>, <c>truecolor</c>, <c>256</c>, <c>16</c>, or <c>none</c>.</summary>
+    public static ColorDepth? ParseColorDepth(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "truecolor" or "24bit" or "24-bit" or "rgb" => ColorDepth.TrueColor,
+        "256" or "ansi256" or "256color" => ColorDepth.Ansi256,
+        "16" or "ansi" or "ansi16" or "basic" => ColorDepth.Ansi16,
+        "none" or "mono" or "off" => ColorDepth.None,
+        _ => null
+    };
 
     /// <summary>Whether frames are drawn on stderr because stdout is being captured.</summary>
     public bool WritesToStderr { get; }
@@ -125,7 +201,7 @@ public sealed class TerminalScreen : IDisposable
     /// <summary>Writes a rendered frame, emitting only the rows that changed.</summary>
     public void Present(ScreenBuffer buffer)
     {
-        var rows = buffer.RenderRows();
+        var rows = buffer.RenderRows(Depth);
 
         if (capture)
         {

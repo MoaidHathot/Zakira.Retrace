@@ -79,21 +79,21 @@ type, a session list, a preview pane, and a reader — with the actions you woul
 three commands together for bound to single keys.
 
 ```
-╭─ Search ────────────────────────────────────────────────────────────────────────╮
-│ / retry backoff▏                                                        [hybrid] │
-╰─────────────────────────────────────────────────────────────────────────────────╯
-╭─ Matches (4) ─────────────────────────╮╭─ Preview  opencode/ses_3aa5f96a ──────╮
-│▍3d ago   opencode Fix retry logic…    ││ Matches                                │
-│          assistant: …exponential bac… ││ [3] assistant: …add exponential backoff│
-│ 1w ago   copilot  Investigate flaky…  ││ ──────────────────────────────────────│
-│          user: the retry test is fla… ││ Fix retry logic in HttpClient          │
-│                                       ││ retrace://opencode/ses_3aa5f96adffe…   │
-│                                       ││ W:\Github\Alpha  |  agent build  |  …  │
-│                                       ││                                        │
-│                                       ││ [0] user  10:32:01                     │
-│                                       ││   The retries never back off           │
-╰───────────────────────────────────────╯╰────────────────────────────────────────╯
- 4 match(es)              j/k move  enter open  / search  r resume  c copy cmd  ? help
+╭─ ◆ retrace ─────────────────────────────────────── hybrid · 12,039 indexed · v0.3.0 ─╮
+│ ❯ retry backoff▏                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Matches · 4 ────────────────────── 160 ms ─╮╭─ Preview ─────────── opencode/ses_3aa5f96a ─╮
+│▎ 3d ago   ● opencode Fix retry logic in Htt… ││ Matches  2                                   │
+│▎          assistant  …add exponential backo… ││ assistant #3  …add exponential backoff to the│
+│  1w ago   ● copilot  Investigate flaky integ… ││ ──────────────────────────────────────────── │
+│           user  the retry test is flaky on … ││ Fix retry logic in HttpClient                │
+│  2w ago   ● vscode   Harden the HTTP client… ││ retrace://opencode/ses_3aa5f96adffelfPdJUmLd │
+│           assistant  …retry with jittered b… ││ dir W:\Github\Alpha · agent build · model …  │
+│                                              ││                                              │
+│                                              ││ ● user  10:32:01  #0                         │
+│                                              ││ ▏ The retries never back off                 │
+╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ 4 matches                               j/k move  ⏎ open  / search  r resume  c copy cmd  ? help
 ```
 
 The flow the tool exists for is three keys long: type a few words, arrow to the session,
@@ -121,6 +121,17 @@ session was recorded in. When the harness exits, so does Retrace.
 The mouse works too — wheel to scroll whichever pane it is over, click to select, click again to
 open — and `--no-mouse` (or `tui.mouse: false`) gives it back to the terminal when you would
 rather select text.
+
+The browser renders in 24-bit colour wherever the terminal supports it (Windows Terminal, modern
+conhost, and anything that sets `COLORTERM`), degrades to the 256-colour palette or the basic
+sixteen elsewhere, and honours `NO_COLOR`. `tui.colorDepth` overrides the detection. Body text is
+left at the terminal's own foreground, so the browser sits inside your theme rather than on top of
+it.
+
+Nothing slow ever runs in front of a keystroke. The embedding model is loaded once at start-up in
+the background, the index top-up that the CLI performs inline runs in the background too (the
+status bar shows it), and searches are queued one at a time so typing quickly never stacks work
+behind itself. Previous results stay on screen, dimmed, until the current ones arrive.
 
 The `tui` command takes the same filters as `list` and `search`, so `retrace tui --here` starts
 scoped to the current directory and `retrace tui --source opencode "connection pool"` starts with a
@@ -198,7 +209,9 @@ retrace search "\"exact phrase\""               # quoted phrases are exact
 ```
 
 Whatever you type is safe: every token is quoted before it reaches FTS5, so a stray `"`, `-`, `*`,
-or `NEAR(` is searched for rather than interpreted as query syntax.
+or `NEAR(` is searched for rather than interpreted as query syntax. Tokens of four characters or
+more also match as prefixes (`retr` finds `retry` and `retrace`); shorter ones match whole words,
+because a two-letter prefix matches most of the index and cannot rank anything meaningfully.
 
 **Semantic search is optional.** Without a model installed, hybrid silently degrades to keyword-only
 rather than failing — a missing optional dependency should not break a working feature.

@@ -80,4 +80,10 @@ public sealed record BrowserOptions
 
     /// <summary>Use relative dates ("3d ago") in the list.</summary>
     public bool RelativeDates { get; init; } = true;
+
+    /// <summary>Colour depth to render with; null detects it from the terminal.</summary>
+    public Terminal.ColorDepth? ColorDepth { get; init; }
+
+    /// <summary>Version shown in the header.</summary>
+    public string? Version { get; init; }
 }

@@ -21,7 +21,7 @@ public sealed partial class SessionBrowser
         }
 
         var reference = row.Session.Ref;
-        SetStatus($"{Spinner} preparing resume command\u2026", milliseconds: 10000);
+        SetStatus("preparing resume command\u2026", StatusKind.Busy, milliseconds: 10000);
 
         var task = Task.Run(async () =>
         {
@@ -32,7 +32,7 @@ public sealed partial class SessionBrowser
             }
             catch (Exception ex)
             {
-                Post(() => SetStatus(ex.Message, isError: true));
+                Post(() => SetStatus(ex.Message, StatusKind.Error));
             }
         });
 
@@ -44,11 +44,11 @@ public sealed partial class SessionBrowser
         status = null;
 
         var lines = new List<StyledSpan[]>();
-        lines.Add([new StyledSpan(TextUtilities.Flatten(session.Title), Style.Plain.Bold())]);
-        lines.Add([new StyledSpan(session.Ref.Uri, Style.Fg(TermColor.Cyan))]);
+        lines.Add([new StyledSpan(TextUtilities.Flatten(session.Title), Theme.Heading)]);
+        lines.Add([new StyledSpan(session.Ref.Uri, Theme.Uri)]);
         lines.Add([]);
-        lines.Add([new StyledSpan("command  ", Theme.Dim), new StyledSpan(command.DisplayCommand, Style.Plain.Bold())]);
-        lines.Add([new StyledSpan("in       ", Theme.Dim), new StyledSpan(command.WorkingDirectory ?? "(current directory)", Style.Plain)]);
+        lines.Add([new StyledSpan("command  ", Theme.Dim), new StyledSpan(command.DisplayCommand, Theme.Heading)]);
+        lines.Add([new StyledSpan("in       ", Theme.Dim), new StyledSpan(command.WorkingDirectory ?? "(current directory)", Theme.Secondary)]);
 
         if (command.WorkingDirectory is { Length: > 0 } directory && !Directory.Exists(directory))
         {
@@ -58,7 +58,7 @@ public sealed partial class SessionBrowser
         if (!command.RestoresConversation)
         {
             lines.Add([]);
-            lines.Add([new StyledSpan("This does not restore the conversation.", Style.Fg(TermColor.Yellow))]);
+            lines.Add([new StyledSpan("This does not restore the conversation.", Theme.Warn)]);
         }
 
         if (command.Notes is { Length: > 0 } notes)
@@ -104,7 +104,7 @@ public sealed partial class SessionBrowser
             }
             catch (Exception ex)
             {
-                Post(() => SetStatus(ex.Message, isError: true));
+                Post(() => SetStatus(ex.Message, StatusKind.Error));
             }
         });
 
@@ -117,14 +117,14 @@ public sealed partial class SessionBrowser
     {
         if (string.IsNullOrEmpty(text))
         {
-            SetStatus($"nothing to copy: no {what} recorded", isError: true);
+            SetStatus($"nothing to copy: no {what} recorded", StatusKind.Error);
             return;
         }
 
         if (headless)
         {
             LastCopied = text;
-            SetStatus($"copied {what}");
+            SetStatus($"copied {what}", StatusKind.Ok);
             return;
         }
 
@@ -133,11 +133,11 @@ public sealed partial class SessionBrowser
         {
             // No clipboard tool on this machine; ask the terminal to do it instead.
             screen.WriteClipboardEscape(text);
-            SetStatus($"copied {what} via terminal (OSC 52)");
+            SetStatus($"copied {what} via the terminal (OSC 52)", StatusKind.Ok);
             return;
         }
 
-        SetStatus($"copied {what}");
+        SetStatus($"copied {what}", StatusKind.Ok);
     }
 
     /// <summary>The last text copied while headless, for tests.</summary>
@@ -148,19 +148,19 @@ public sealed partial class SessionBrowser
         var directory = Selected?.Session.Workspace?.Path;
         if (string.IsNullOrEmpty(directory))
         {
-            SetStatus("no working directory recorded for this session", isError: true);
+            SetStatus("no working directory recorded for this session", StatusKind.Error);
             return;
         }
 
         if (!Directory.Exists(directory))
         {
-            SetStatus($"directory no longer exists: {directory}", isError: true);
+            SetStatus($"directory no longer exists: {directory}", StatusKind.Error);
             return;
         }
 
         if (headless)
         {
-            SetStatus($"opened {directory}");
+            SetStatus($"opened {directory}", StatusKind.Ok);
             return;
         }
 
@@ -173,11 +173,11 @@ public sealed partial class SessionBrowser
                     : new ProcessStartInfo("xdg-open", directory) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
 
             using var process = Process.Start(startInfo);
-            SetStatus($"opened {directory}");
+            SetStatus($"opened {directory}", StatusKind.Ok);
         }
         catch (Exception ex)
         {
-            SetStatus($"could not open folder: {ex.Message}", isError: true);
+            SetStatus($"could not open folder: {ex.Message}", StatusKind.Error);
         }
     }
 
@@ -194,7 +194,7 @@ public sealed partial class SessionBrowser
         var reference = row.Session.Ref;
         var fileName = $"{reference.SourceId}-{SafeFileName(reference.NativeId)}.md";
         var path = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-        SetStatus($"{Spinner} exporting\u2026", milliseconds: 30000);
+        SetStatus("exporting\u2026", StatusKind.Busy, milliseconds: 30000);
 
         var task = Task.Run(async () =>
         {
@@ -208,11 +208,11 @@ public sealed partial class SessionBrowser
                     await File.WriteAllTextAsync(path, markdown, CancellationToken.None).ConfigureAwait(false);
                 }
 
-                Post(() => SetStatus($"exported {fileName}", milliseconds: 6000));
+                Post(() => SetStatus($"exported {fileName}", StatusKind.Ok, milliseconds: 6000));
             }
             catch (Exception ex)
             {
-                Post(() => SetStatus($"export failed: {ex.Message}", isError: true));
+                Post(() => SetStatus($"export failed: {ex.Message}", StatusKind.Error));
             }
         });
 
@@ -370,12 +370,12 @@ public sealed partial class SessionBrowser
                         Post(() =>
                         {
                             ReplaceRowTags(reference, tags);
-                            SetStatus(tags.Count == 0 ? "tags cleared" : "tags: " + string.Join(" ", tags.Select(tag => "#" + tag)), milliseconds: 5000);
+                            SetStatus(tags.Count == 0 ? "tags cleared" : "tags: " + string.Join(" ", tags.Select(tag => "#" + tag)), StatusKind.Ok, milliseconds: 5000);
                         });
                     }
                     catch (Exception ex)
                     {
-                        Post(() => SetStatus($"tagging failed: {ex.Message}", isError: true));
+                        Post(() => SetStatus($"tagging failed: {ex.Message}", StatusKind.Error));
                     }
                 });
 
@@ -428,7 +428,7 @@ public sealed partial class SessionBrowser
             case PickKind.Directory:
                 if (string.IsNullOrEmpty(session.Workspace?.Path))
                 {
-                    SetStatus("this session has no recorded directory", isError: true);
+                    SetStatus("this session has no recorded directory", StatusKind.Error);
                     return;
                 }
 
@@ -447,7 +447,7 @@ public sealed partial class SessionBrowser
                     }
                     catch (Exception ex)
                     {
-                        Post(() => SetStatus(ex.Message, isError: true));
+                        Post(() => SetStatus(ex.Message, StatusKind.Error));
                     }
                 });
 
@@ -474,36 +474,39 @@ public sealed partial class SessionBrowser
         }
 
         refreshing = true;
-        refreshMessage = "refreshing index\u2026";
+        activity = "refreshing index";
         dirty = true;
 
-        var progress = new Progress<IndexProgress>(report => Post(() => refreshMessage = $"indexing {report.SourceId}: {report.Message}"));
+        var progress = ActivityProgress(report => $"indexing {report.SourceId} \u00b7 {report.Processed:N0} session(s)");
 
         var task = Task.Run(async () =>
         {
             try
             {
-                var built = await backend.RefreshIndexAsync(progress, CancellationToken.None).ConfigureAwait(false);
+                var built = await backend.RefreshIndexAsync(progress, lifetime.Token).ConfigureAwait(false);
                 Post(() =>
                 {
                     refreshing = false;
-                    refreshMessage = null;
+                    activity = null;
                     var skipped = built.Sources.Where(source => source.SkipReason is not null).Select(source => source.SourceId).ToArray();
-                    var note = skipped.Length > 0 ? $"; skipped {string.Join(", ", skipped)}" : string.Empty;
-                    SetStatus($"indexed {built.SessionsIndexed:N0} session(s) in {built.Duration.TotalSeconds:F1}s{note}", milliseconds: 6000);
+                    var note = skipped.Length > 0 ? $" \u00b7 skipped {string.Join(", ", skipped)}" : string.Empty;
+                    SetStatus($"indexed {built.SessionsIndexed:N0} session(s) in {built.Duration.TotalSeconds:F1}s{note}", StatusKind.Ok, milliseconds: 6000);
                     ScheduleQuery(immediate: true);
                 });
+            }
+            catch (OperationCanceledException)
+            {
             }
             catch (Exception ex)
             {
                 Post(() =>
                 {
                     refreshing = false;
-                    refreshMessage = null;
-                    SetStatus($"refresh failed: {ex.Message}", isError: true, milliseconds: 8000);
+                    activity = null;
+                    SetStatus($"refresh failed: {ex.Message}", StatusKind.Error, milliseconds: 8000);
                 });
             }
-        });
+        }, lifetime.Token);
 
         Track(task);
     }

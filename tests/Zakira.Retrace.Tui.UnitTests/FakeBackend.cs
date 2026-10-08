@@ -81,35 +81,48 @@ internal sealed class FakeBackend : IBrowserBackend
 
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, CancellationToken cancellationToken)
     {
-        await Task.Delay(Delay, cancellationToken);
-        SearchQueries.Add(query.Text);
-
-        if (ThrowIndexNotBuilt)
+        var running = Interlocked.Increment(ref concurrentSearches);
+        MaxConcurrentSearches = Math.Max(MaxConcurrentSearches, running);
+        try
         {
-            throw new IndexNotBuiltException("/tmp/index.db");
-        }
+            await Task.Delay(Delay, cancellationToken);
+            SearchQueries.Add(query.Text);
 
-        var hits = new List<SearchHit>();
-        foreach (var transcript in Transcripts)
-        {
-            if (query.Filter.SourceIds.Count > 0 && !query.Filter.SourceIds.Contains(transcript.Summary.Ref.SourceId, StringComparer.OrdinalIgnoreCase))
+            if (ThrowIndexNotBuilt)
             {
-                continue;
+                throw new IndexNotBuiltException("/tmp/index.db");
             }
 
-            var snippets = transcript.Turns
-                .Where(turn => turn.PlainText.Contains(query.Text, StringComparison.OrdinalIgnoreCase))
-                .Select(turn => new SearchSnippet { Role = turn.Role, TurnIndex = turn.Index, Text = turn.PlainText })
-                .ToList();
-
-            if (snippets.Count > 0 || transcript.Summary.Title.Contains(query.Text, StringComparison.OrdinalIgnoreCase))
+            var hits = new List<SearchHit>();
+            foreach (var transcript in Transcripts)
             {
-                hits.Add(new SearchHit { Session = Decorate(transcript), Score = snippets.Count + 1, Snippets = snippets });
-            }
-        }
+                if (query.Filter.SourceIds.Count > 0 && !query.Filter.SourceIds.Contains(transcript.Summary.Ref.SourceId, StringComparer.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-        return [.. hits.OrderByDescending(hit => hit.Score)];
+                var snippets = transcript.Turns
+                    .Where(turn => turn.PlainText.Contains(query.Text, StringComparison.OrdinalIgnoreCase))
+                    .Select(turn => new SearchSnippet { Role = turn.Role, TurnIndex = turn.Index, Text = turn.PlainText })
+                    .ToList();
+
+                if (snippets.Count > 0 || transcript.Summary.Title.Contains(query.Text, StringComparison.OrdinalIgnoreCase))
+                {
+                    hits.Add(new SearchHit { Session = Decorate(transcript), Score = snippets.Count + 1, Snippets = snippets });
+                }
+            }
+
+            return [.. hits.OrderByDescending(hit => hit.Score)];
+        }
+        finally
+        {
+            Interlocked.Decrement(ref concurrentSearches);
+        }
     }
+
+    private int concurrentSearches;
+
+    public int MaxConcurrentSearches { get; private set; }
 
     public async Task<SessionTranscript> GetTranscriptAsync(SessionRef session, TranscriptOptions options, CancellationToken cancellationToken)
     {
@@ -169,6 +182,30 @@ internal sealed class FakeBackend : IBrowserBackend
             Duration = TimeSpan.FromSeconds(1.5)
         });
     }
+
+    public int TopUpCalls { get; private set; }
+
+    public bool TopUpChanges { get; set; }
+
+    public int WarmUpCalls { get; private set; }
+
+    public bool SemanticAvailable { get; set; } = true;
+
+    public Task<bool> TopUpIndexAsync(IProgress<IndexProgress> progress, CancellationToken cancellationToken)
+    {
+        TopUpCalls++;
+        progress.Report(new IndexProgress("opencode", 1, 1, "indexed 1 session(s)"));
+        return Task.FromResult(TopUpChanges);
+    }
+
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        WarmUpCalls++;
+        return Task.CompletedTask;
+    }
+
+    public Task<IndexInfo> GetIndexInfoAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(new IndexInfo(!ThrowIndexNotBuilt, Transcripts.Count, SemanticAvailable ? "fake-model" : null, SemanticAvailable));
 
     private SessionSummary Decorate(SessionTranscript transcript) =>
         Tags.TryGetValue(transcript.Summary.Ref.Uri, out var tags)

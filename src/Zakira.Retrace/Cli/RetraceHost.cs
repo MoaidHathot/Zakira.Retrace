@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Zakira.Retrace.Core.Configuration;
 using Zakira.Retrace.Core.DependencyInjection;
+using Zakira.Retrace.Core.Embeddings;
 using Zakira.Retrace.Sources.CopilotCli;
 using Zakira.Retrace.Sources.CopilotVsCode;
 using Zakira.Retrace.Sources.OpenCode;
@@ -27,6 +28,12 @@ internal sealed class RetraceHost(string? configPath, bool verbose) : IAsyncDisp
 
     /// <summary>The config store for the resolved path.</summary>
     public ConfigStore Store => store ??= new ConfigStore(Paths, configPath);
+
+    /// <summary>
+    /// Whether this process will run many queries rather than one. Set before the container is
+    /// built; the interactive browser sets it so the embedding model is loaded once and kept.
+    /// </summary>
+    public bool LongLived { get; set; }
 
     /// <summary>Loads configuration, creating the file with full defaults when absent.</summary>
     public async Task<RetraceConfig> GetConfigAsync(CancellationToken cancellationToken)
@@ -69,6 +76,14 @@ internal sealed class RetraceHost(string? configPath, bool verbose) : IAsyncDisp
         services.AddOpenCodeSource();
         services.AddCopilotCliSource();
         services.AddCopilotVsCodeSource();
+
+        if (LongLived)
+        {
+            // The last registration wins, so this wraps the per-operation factory Core registers.
+            // A one-shot command keeps the cheap behaviour; the browser keeps the model warm.
+            services.AddSingleton<IEmbeddingProviderFactory>(provider =>
+                new CachingEmbeddingProviderFactory(ActivatorUtilities.CreateInstance<OnnxEmbeddingProviderFactory>(provider)));
+        }
 
         provider = services.BuildServiceProvider();
         return provider;

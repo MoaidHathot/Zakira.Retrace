@@ -24,6 +24,20 @@ public static class Fts5Query
     private const int MaxTokens = 24;
 
     /// <summary>
+    /// Shortest token that is expanded into a prefix match.
+    /// </summary>
+    /// <remarks>
+    /// A prefix query is answered by scoring every row containing any word that starts with the
+    /// prefix, and on a large index <c>re*</c> or <c>con*</c> is most of the rows there are. Measured
+    /// on a 735,000-passage index: <c>re*</c> took close to two minutes and <c>con*</c> two
+    /// seconds, while <c>retry*</c> took a tenth of a second. Below this length a token matches as a
+    /// whole word instead, which is cheap and, since a two-letter prefix matches too much to rank
+    /// meaningfully, loses nothing the ranking could have used. This is what keeps search-as-you-type
+    /// usable while the first letters of a word are being typed.
+    /// </remarks>
+    public const int MinimumPrefixLength = 4;
+
+    /// <summary>
     /// Very common English words carry almost no discriminating power but do dominate an OR query's
     /// candidate set. Dropping them keeps the shortlist focused on the terms that matter.
     /// </summary>
@@ -79,7 +93,8 @@ public static class Fts5Query
             builder.Append('"').Append(term.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
 
             // A prefix marker is only valid on a single-word token; FTS5 rejects it after a phrase.
-            if (prefixMatch && !term.Contains(' ', StringComparison.Ordinal))
+            // Short tokens stay whole-word matches; see MinimumPrefixLength.
+            if (prefixMatch && term.Length >= MinimumPrefixLength && !term.Contains(' ', StringComparison.Ordinal))
             {
                 builder.Append('*');
             }

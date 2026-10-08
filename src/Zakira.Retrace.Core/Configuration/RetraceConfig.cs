@@ -428,6 +428,13 @@ public sealed class TuiConfig
     public bool Mouse { get; set; } = true;
 
     /// <summary>
+    /// Colours to render with: <c>auto</c> (detect from the terminal), <c>truecolor</c>,
+    /// <c>256</c>, <c>16</c>, or <c>none</c>.
+    /// </summary>
+    [JsonPropertyName("colorDepth")]
+    public string ColorDepth { get; set; } = "auto";
+
+    /// <summary>
     /// Character budget for the transcript loaded into the preview and reader panes. The full
     /// conversation is read in pages when you scroll past it. <c>0</c> means unbounded.
     /// </summary>

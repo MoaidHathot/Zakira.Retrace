@@ -29,26 +29,14 @@ public sealed record TranscriptFormatOptions(
 /// Lays a transcript out as terminal lines.
 /// </summary>
 /// <remarks>
-/// The layout mirrors <c>retrace show</c> — a header, then one block per turn with a role label —
-/// so a session reads the same whether it is on screen in the browser or piped from the CLI.
-/// Wrapping happens here rather than at draw time because the reader needs line counts to scroll
-/// and to jump between turns and matches.
+/// Each turn opens with a coloured dot and the role, and every line of its body hangs off a thin
+/// rule in the same colour, so the eye can follow who said what down a long conversation without
+/// reading the labels. Wrapping happens here rather than at draw time because the reader needs
+/// line counts to scroll and to jump between turns and matches.
 /// </remarks>
 public static class TranscriptFormatter
 {
-    private static readonly Style HeaderTitle = Style.Plain.Bold();
-    private static readonly Style HeaderUri = Style.Fg(TermColor.Cyan);
-    private static readonly Style Meta = Style.Fg(TermColor.BrightBlack);
-    private static readonly Style UserRole = Style.Fg(TermColor.Green).Bold();
-    private static readonly Style AssistantRole = Style.Fg(TermColor.Cyan).Bold();
-    private static readonly Style ToolRole = Style.Fg(TermColor.Yellow).Bold();
-    private static readonly Style OtherRole = Style.Fg(TermColor.BrightBlack).Bold();
-    private static readonly Style Body = Style.Plain;
-    private static readonly Style Reasoning = Style.Fg(TermColor.BrightBlack).With(TermAttr.Italic);
-    private static readonly Style ToolMarker = Style.Fg(TermColor.Yellow);
-    private static readonly Style ToolOutput = Style.Fg(TermColor.BrightBlack);
-    private static readonly Style PatchMarker = Style.Fg(TermColor.Magenta);
-    private static readonly Style Match = new(TermColor.Black, TermColor.Yellow, TermAttr.Bold);
+    private const string Rule = "\u258f ";
 
     /// <summary>Formats a whole transcript.</summary>
     public static IReadOnlyList<TranscriptLine> Format(SessionTranscript transcript, TranscriptFormatOptions options)
@@ -57,45 +45,56 @@ public static class TranscriptFormatter
         var width = Math.Max(10, options.Width);
         var summary = transcript.Summary;
 
-        lines.Add(Header(summary.Title, HeaderTitle, width));
-        lines.Add(Header(summary.Ref.Uri, HeaderUri, width));
+        lines.Add(Header(summary.Title, Theme.Heading, width));
+        lines.Add(Header(summary.Ref.Uri, Theme.Uri, width));
 
-        var facts = new List<string>();
+        var facts = new List<StyledSpan>();
+        void Fact(string label, string value)
+        {
+            if (facts.Count > 0)
+            {
+                facts.Add(new StyledSpan("  \u00b7  ", Theme.TranscriptMeta));
+            }
+
+            facts.Add(new StyledSpan(label + " ", Theme.TranscriptMeta));
+            facts.Add(new StyledSpan(value, Theme.TranscriptMetaValue));
+        }
+
         if (summary.Workspace?.Path is { Length: > 0 } path)
         {
-            facts.Add(path);
+            Fact("dir", path);
         }
 
         if (summary.Workspace?.Branch is { Length: > 0 } branch)
         {
-            facts.Add($"branch {branch}");
+            Fact("branch", branch);
         }
 
         if (summary.Agent is { Length: > 0 } agent)
         {
-            facts.Add($"agent {agent}");
+            Fact("agent", agent);
         }
 
         if (summary.Models.Count > 0)
         {
-            facts.Add(string.Join(", ", summary.Models));
+            Fact("model", string.Join(", ", summary.Models));
         }
 
-        facts.Add(summary.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        Fact("created", summary.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
 
         if (summary.Stats.MessageCount is { } messages and > 0)
         {
-            facts.Add($"{messages} msg");
+            Fact("messages", messages.ToString("N0", CultureInfo.InvariantCulture));
         }
 
         if (summary.Tags.Count > 0)
         {
-            facts.Add("#" + string.Join(" #", summary.Tags));
+            Fact("tags", string.Join(" ", summary.Tags.Select(tag => "#" + tag)));
         }
 
-        foreach (var wrapped in TextWidth.Wrap(string.Join("  |  ", facts), width))
+        foreach (var wrapped in WrapSpans(facts, width))
         {
-            lines.Add(new TranscriptLine([new StyledSpan(wrapped, Meta)], -1, false, false));
+            lines.Add(new TranscriptLine(wrapped, -1, false, false));
         }
 
         lines.Add(Blank(-1));
@@ -108,7 +107,7 @@ public static class TranscriptFormatter
         if (transcript.IsTruncated)
         {
             lines.Add(new TranscriptLine(
-                [new StyledSpan($"Transcript truncated at turn {transcript.NextTurnIndex} of {transcript.TotalTurns}. Scroll down to load more.", Style.Fg(TermColor.Yellow))],
+                [new StyledSpan($"\u2026 {transcript.TotalTurns - (transcript.NextTurnIndex ?? 0):N0} more turn(s). Scroll down to load them.", Theme.Warn)],
                 transcript.Turns.Count > 0 ? transcript.Turns[^1].Index : -1,
                 false,
                 false));
@@ -170,7 +169,7 @@ public static class TranscriptFormatter
                 spans.Add(new StyledSpan(text[position..bestIndex], style));
             }
 
-            spans.Add(new StyledSpan(text.Substring(bestIndex, bestLength), Match));
+            spans.Add(new StyledSpan(text.Substring(bestIndex, bestLength), Theme.Match));
             any = true;
             position = bestIndex + bestLength;
         }
@@ -178,32 +177,76 @@ public static class TranscriptFormatter
         return (spans, any);
     }
 
+    /// <summary>Word-wraps a run of spans to a width, keeping each word's style.</summary>
+    public static IEnumerable<IReadOnlyList<StyledSpan>> WrapSpans(IReadOnlyList<StyledSpan> spans, int width)
+    {
+        var line = new List<StyledSpan>();
+        var used = 0;
+
+        foreach (var span in spans)
+        {
+            var words = span.Text.Split(' ');
+            for (var index = 0; index < words.Length; index++)
+            {
+                var word = words[index] + (index < words.Length - 1 ? " " : string.Empty);
+                var wordWidth = TextWidth.Of(word);
+                if (wordWidth == 0)
+                {
+                    continue;
+                }
+
+                if (used > 0 && used + TextWidth.Of(word.TrimEnd()) > width)
+                {
+                    yield return TrimEnd(line);
+                    line = [];
+                    used = 0;
+                }
+
+                line.Add(new StyledSpan(word, span.Style));
+                used += wordWidth;
+            }
+        }
+
+        if (line.Count > 0)
+        {
+            yield return TrimEnd(line);
+        }
+    }
+
+    private static List<StyledSpan> TrimEnd(List<StyledSpan> line)
+    {
+        if (line.Count > 0)
+        {
+            var last = line[^1];
+            line[^1] = last with { Text = last.Text.TrimEnd() };
+        }
+
+        return line;
+    }
+
     private static void AppendTurn(List<TranscriptLine> lines, Turn turn, TranscriptFormatOptions options, int width)
     {
-        var (roleLabel, roleStyle) = turn.Role switch
-        {
-            TurnRole.User => ("user", UserRole),
-            TurnRole.Assistant => ("assistant", AssistantRole),
-            TurnRole.Tool => ("tool", ToolRole),
-            TurnRole.System => ("system", OtherRole),
-            _ => ("info", OtherRole)
-        };
+        var roleColor = Theme.RoleColor(turn.Role);
+        var roleStyle = Style.Fg(roleColor).Bold();
+        var ruleStyle = Style.Fg(roleColor).Dim();
 
         var head = new List<StyledSpan>
         {
-            new($"[{turn.Index}] ", Style.Plain.Bold()),
-            new(roleLabel, roleStyle)
+            new("\u25cf ", Style.Fg(roleColor)),
+            new(TextUtilities.RoleLabel(turn.Role), roleStyle)
         };
 
         if (turn.Model is { Length: > 0 })
         {
-            head.Add(new StyledSpan("  " + turn.Model, Meta));
+            head.Add(new StyledSpan("  " + turn.Model, Theme.TranscriptMeta));
         }
 
         if (turn.Timestamp is { } stamp)
         {
-            head.Add(new StyledSpan("  " + stamp.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture), Meta));
+            head.Add(new StyledSpan("  " + stamp.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture), Theme.TranscriptMeta));
         }
+
+        head.Add(new StyledSpan($"  #{turn.Index}", Style.Fg(Theme.Faint)));
 
         lines.Add(new TranscriptLine(head, turn.Index, true, false));
 
@@ -214,26 +257,26 @@ public static class TranscriptFormatter
             switch (block)
             {
                 case TextBlock text when !string.IsNullOrWhiteSpace(text.Text):
-                    AppendParagraphs(lines, text.Text, Body, turn.Index, options, width, indent: 2);
+                    AppendParagraphs(lines, text.Text, Theme.Body, turn.Index, options, width, ruleStyle);
                     wroteAnything = true;
                     break;
 
                 case ReasoningBlock reasoning when options.ShowReasoning && !string.IsNullOrWhiteSpace(reasoning.Text):
-                    lines.Add(new TranscriptLine([new StyledSpan("  reasoning", Reasoning)], turn.Index, false, false));
-                    AppendParagraphs(lines, reasoning.Text, Reasoning, turn.Index, options, width, indent: 4);
+                    lines.Add(new TranscriptLine([new StyledSpan(Rule, ruleStyle), new StyledSpan("reasoning", Theme.Reasoning.Bold())], turn.Index, false, false));
+                    AppendParagraphs(lines, reasoning.Text, Theme.Reasoning, turn.Index, options, width, ruleStyle, indent: 2);
                     wroteAnything = true;
                     break;
 
                 case ToolCallBlock tool:
                 {
                     var label = string.IsNullOrWhiteSpace(tool.Title) ? tool.ToolName : $"{tool.ToolName}: {tool.Title}";
-                    var status = tool.Status is { Length: > 0 } ? $" ({tool.Status})" : string.Empty;
-                    var (labelSpans, matched) = Highlight(TextUtilities.Flatten(label), Body, options.HighlightTerms);
-                    var spans = new List<StyledSpan> { new("  \u2192 ", ToolMarker) };
+                    var status = tool.Status is { Length: > 0 } ? $"  {tool.Status}" : string.Empty;
+                    var (labelSpans, matched) = Highlight(TextUtilities.Flatten(label), Theme.Secondary, options.HighlightTerms);
+                    var spans = new List<StyledSpan> { new(Rule, ruleStyle), new("\u2192 ", Theme.ToolMarker) };
                     spans.AddRange(labelSpans);
                     if (status.Length > 0)
                     {
-                        spans.Add(new StyledSpan(status, Meta));
+                        spans.Add(new StyledSpan(status, Theme.TranscriptMeta));
                     }
 
                     lines.Add(new TranscriptLine(spans, turn.Index, false, matched));
@@ -244,7 +287,7 @@ public static class TranscriptFormatter
                             ? tool.Output[..options.MaxToolOutputCharacters] + $"\n\u2026 [{tool.Output.Length - options.MaxToolOutputCharacters:N0} more characters]"
                             : tool.Output;
 
-                        AppendParagraphs(lines, output, ToolOutput, turn.Index, options, width, indent: 6, preserveLines: true);
+                        AppendParagraphs(lines, output, Theme.ToolOutput, turn.Index, options, width, ruleStyle, indent: 4, preserveLines: true);
                     }
 
                     wroteAnything = true;
@@ -253,13 +296,13 @@ public static class TranscriptFormatter
 
                 case PatchBlock patch:
                 {
-                    var counts = patch.Additions > 0 || patch.Deletions > 0 ? $" (+{patch.Additions}/-{patch.Deletions})" : string.Empty;
-                    var (pathSpans, matched) = Highlight(patch.Path, Body, options.HighlightTerms);
-                    var spans = new List<StyledSpan> { new("  \u00b1 ", PatchMarker) };
+                    var counts = patch.Additions > 0 || patch.Deletions > 0 ? $"  +{patch.Additions} \u2212{patch.Deletions}" : string.Empty;
+                    var (pathSpans, matched) = Highlight(patch.Path, Theme.Secondary, options.HighlightTerms);
+                    var spans = new List<StyledSpan> { new(Rule, ruleStyle), new("\u00b1 ", Theme.PatchMarker) };
                     spans.AddRange(pathSpans);
                     if (counts.Length > 0)
                     {
-                        spans.Add(new StyledSpan(counts, Meta));
+                        spans.Add(new StyledSpan(counts, Theme.TranscriptMeta));
                     }
 
                     lines.Add(new TranscriptLine(spans, turn.Index, false, matched));
@@ -271,7 +314,7 @@ public static class TranscriptFormatter
 
         if (!wroteAnything)
         {
-            lines.Add(new TranscriptLine([new StyledSpan("  (no text)", Meta)], turn.Index, false, false));
+            lines.Add(new TranscriptLine([new StyledSpan(Rule, ruleStyle), new StyledSpan("(no text)", Theme.Dim)], turn.Index, false, false));
         }
 
         lines.Add(Blank(turn.Index));
@@ -284,11 +327,12 @@ public static class TranscriptFormatter
         int turnIndex,
         TranscriptFormatOptions options,
         int width,
-        int indent,
+        Style ruleStyle,
+        int indent = 0,
         bool preserveLines = false)
     {
-        var prefix = new string(' ', indent);
-        var inner = Math.Max(4, width - indent);
+        var prefix = indent > 0 ? new string(' ', indent) : string.Empty;
+        var inner = Math.Max(4, width - Rule.Length - indent);
 
         foreach (var rawLine in text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
         {
@@ -296,14 +340,19 @@ public static class TranscriptFormatter
 
             if (source.Length == 0)
             {
-                lines.Add(Blank(turnIndex));
+                lines.Add(new TranscriptLine([new StyledSpan(Rule.TrimEnd(), ruleStyle)], turnIndex, false, false));
                 continue;
             }
 
             foreach (var wrapped in TextWidth.Wrap(source, inner))
             {
                 var (spans, matched) = Highlight(wrapped, style, options.HighlightTerms);
-                var withPrefix = new List<StyledSpan>(spans.Count + 1) { new(prefix, Style.Plain) };
+                var withPrefix = new List<StyledSpan>(spans.Count + 2) { new(Rule, ruleStyle) };
+                if (prefix.Length > 0)
+                {
+                    withPrefix.Add(new StyledSpan(prefix, Style.Plain));
+                }
+
                 withPrefix.AddRange(spans);
                 lines.Add(new TranscriptLine(withPrefix, turnIndex, false, matched));
             }

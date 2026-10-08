@@ -249,6 +249,18 @@ public sealed class IndexTests
         Fts5Query.Build(input).Should().Be(expected);
     }
 
+    [Theory]
+    [InlineData("re", "\"re\"")]
+    [InlineData("ret", "\"ret\"")]
+    [InlineData("retr", "\"retr\"*")]
+    [InlineData("db retry", "\"db\" OR \"retry\"*")]
+    public void Fts5_query_only_prefix_expands_tokens_long_enough_to_be_selective(string input, string expected)
+    {
+        // "re"* is most of the index: scoring it took close to two minutes on a real store, and a
+        // two-letter prefix cannot rank anything meaningfully anyway. Short tokens match whole words.
+        Fts5Query.Build(input).Should().Be(expected);
+    }
+
     [Fact]
     public void Fts5_query_preserves_a_quoted_phrase_as_a_phrase()
     {
@@ -956,6 +968,37 @@ public sealed class IndexTests
         hits[0].Session.Ref.NativeId.Should().Be("s2");
         hits[0].Snippets.Should().NotBeEmpty();
         hits[0].Snippets[0].Highlighted.Should().Contain("<<");
+    }
+
+    [Fact]
+    public async Task Snippets_are_fetched_for_every_hit_and_zero_means_none()
+    {
+        using var temp = new TempDirectory();
+        var transcripts = Enumerable.Range(0, 12)
+            .Select(index => MakeTranscript($"s{index}", $"Session {index}", $"question {index} about caching", $"answer {index}: the cache invalidates on write"))
+            .ToList();
+
+        var (builder, searcher, _) = CreateIndex(temp, transcripts);
+        await builder.BuildAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+
+        var withSnippets = await searcher.SearchAsync(
+            new SearchQuery { Text = "cache", Mode = SearchMode.Lexical, Top = 12, SnippetsPerSession = 2 },
+            TestContext.Current.CancellationToken);
+
+        // One batched statement serves every hit; each still gets its own, correctly attributed snippets.
+        withSnippets.Should().HaveCount(12);
+        withSnippets.Should().AllSatisfy(hit =>
+        {
+            hit.Snippets.Should().NotBeEmpty().And.HaveCountLessThanOrEqualTo(2);
+            hit.Snippets.Should().AllSatisfy(snippet => snippet.Text.Should().Contain(hit.Session.Ref.NativeId[1..]));
+        });
+
+        var withoutSnippets = await searcher.SearchAsync(
+            new SearchQuery { Text = "cache", Mode = SearchMode.Lexical, Top = 12, SnippetsPerSession = 0 },
+            TestContext.Current.CancellationToken);
+
+        withoutSnippets.Should().HaveCount(12);
+        withoutSnippets.Should().AllSatisfy(hit => hit.Snippets.Should().BeEmpty("zero snippets means the excerpt query is skipped entirely"));
     }
 
     [Fact]

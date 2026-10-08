@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using Zakira.Retrace.Abstractions;
+using Zakira.Retrace.Core.Index;
 using Zakira.Retrace.Tui.Terminal;
 
 namespace Zakira.Retrace.Tui;
@@ -17,14 +18,16 @@ namespace Zakira.Retrace.Tui;
 /// between frames. That rule is what lets the rest of the class be written without a single lock.
 /// </para>
 /// <para>
-/// The loop is a plain dirty-flag renderer at roughly 60 Hz when something is happening and
-/// asleep otherwise, which is what a tool that sits in a terminal all day owes the machine.
+/// Nothing that can take longer than a frame runs on the loop thread. Searches, transcript reads,
+/// the index top-up, and the embedding model's warm-up all happen in the background and report
+/// back; the loop's only jobs are to draw, to animate while it waits, and to react to keys.
 /// </para>
 /// </remarks>
 public sealed partial class SessionBrowser : IDisposable
 {
-    private const int DebounceMilliseconds = 140;
+    private const int DebounceMilliseconds = 160;
     private const int PreviewDebounceMilliseconds = 90;
+    private const int SpinnerIntervalMilliseconds = 80;
 
     private readonly IBrowserBackend backend;
     private readonly BrowserOptions options;
@@ -34,10 +37,12 @@ public sealed partial class SessionBrowser : IDisposable
     private readonly ConcurrentQueue<KeyEvent> keys = new();
     private readonly List<Task> inFlight = [];
     private readonly Stopwatch clock = Stopwatch.StartNew();
+    private readonly CancellationTokenSource lifetime = new();
 
     private ScreenBuffer buffer;
     private bool running = true;
     private bool dirty = true;
+    private long lastSpinnerFrame = -1;
     private BrowserResult result = BrowserResult.Quit;
 
     // ---- list state --------------------------------------------------------------------------
@@ -57,13 +62,22 @@ public sealed partial class SessionBrowser : IDisposable
     private SearchMode searchMode;
     private bool showToolOutput;
     private bool showReasoning;
+
+    // One query runs at a time. A keystroke that arrives while one is in flight marks the query
+    // dirty, and the latest text is run once the current one finishes. Starting a fresh search on
+    // every keystroke would stack half a dozen database scans on top of each other, each slowing
+    // the others down, with only the last one's result wanted.
+    private bool queryInFlight;
+    private bool queryDirty;
     private bool queryLoading;
+    private bool hasLoadedOnce;
     private string? queryError;
     private int queryGeneration;
     private long? queryDueAt;
     private CancellationTokenSource? queryCancellation;
     private bool lastQueryWasSearch;
     private string lastExecutedQuery = string.Empty;
+    private TimeSpan lastQueryDuration;
 
     // ---- transcript state --------------------------------------------------------------------
 
@@ -79,6 +93,12 @@ public sealed partial class SessionBrowser : IDisposable
     private int formattedWidth = -1;
     private int previewScroll;
     private int readerScroll;
+
+    // ---- background activity -----------------------------------------------------------------
+
+    private IndexInfo? indexInfo;
+    private string? activity;
+    private bool refreshing;
 
     // ---- modes and overlays ------------------------------------------------------------------
 
@@ -102,10 +122,16 @@ public sealed partial class SessionBrowser : IDisposable
     private ConfirmState? confirm;
     private InputState? input;
     private string? status;
-    private bool statusIsError;
+    private StatusKind statusKind;
     private long statusUntil;
-    private bool refreshing;
-    private string? refreshMessage;
+
+    private enum StatusKind
+    {
+        Info,
+        Ok,
+        Error,
+        Busy
+    }
 
     private sealed record ConfirmState(string Title, IReadOnlyList<StyledSpan[]> Lines, Action Accept, Action? Copy, string AcceptLabel);
 
@@ -122,7 +148,7 @@ public sealed partial class SessionBrowser : IDisposable
 
     /// <summary>Creates a browser attached to the real terminal.</summary>
     public SessionBrowser(IBrowserBackend backend, BrowserOptions options)
-        : this(backend, options, new TerminalScreen(options.Mouse), headless: false)
+        : this(backend, options, new TerminalScreen(options.Mouse, options.ColorDepth), headless: false)
     {
     }
 
@@ -227,13 +253,16 @@ public sealed partial class SessionBrowser : IDisposable
 
                 if (!handled && !dirty)
                 {
-                    Thread.Sleep(16);
+                    // Idle: sleep a frame. While something is animating, Tick marks the frame dirty
+                    // when the spinner advances, so the sleep here is what sets the frame rate.
+                    Thread.Sleep(IsAnimating ? 16 : 24);
                 }
             }
         }
         finally
         {
             running = false;
+            lifetime.Cancel();
             queryCancellation?.Cancel();
             transcriptCancellation?.Cancel();
             screen.Dispose();
@@ -242,15 +271,37 @@ public sealed partial class SessionBrowser : IDisposable
         return result;
     }
 
-    /// <summary>Kicks off the initial query. Called by <see cref="Run"/>; exposed for headless tests.</summary>
+    /// <summary>Kicks off the initial query and the background start-up work. Called by <see cref="Run"/>; exposed for headless tests.</summary>
     public void Start()
     {
         queryDueAt = clock.ElapsedMilliseconds;
         Tick();
+        BeginStartupWork();
     }
 
     /// <summary>Feeds one key, for tests.</summary>
     public void Press(KeyEvent keyEvent) => HandleKey(keyEvent);
+
+    /// <summary>Runs one loop tick without drawing, for tests. Returns whether the frame became dirty.</summary>
+    public bool TickForTest()
+    {
+        dirty = false;
+        Tick();
+        var wasDirty = dirty;
+        dirty = false;
+        return wasDirty;
+    }
+
+    /// <summary>Fires any pending debounce immediately, for tests, without waiting for the result.</summary>
+    public void ForceDueQueriesForTest()
+    {
+        if (queryDueAt is not null)
+        {
+            queryDueAt = 0;
+        }
+
+        Tick();
+    }
 
     /// <summary>Types a string, for tests.</summary>
     public void Type(string text)
@@ -267,7 +318,7 @@ public sealed partial class SessionBrowser : IDisposable
     /// </summary>
     public async Task SettleAsync()
     {
-        for (var iteration = 0; iteration < 20; iteration++)
+        for (var iteration = 0; iteration < 40; iteration++)
         {
             queryDueAt = queryDueAt is null ? null : 0;
             previewDueAt = previewDueAt is null ? null : 0;
@@ -280,7 +331,7 @@ public sealed partial class SessionBrowser : IDisposable
                 pending = [.. inFlight];
             }
 
-            if (pending.Length == 0 && posted.IsEmpty && queryDueAt is null && previewDueAt is null)
+            if (pending.Length == 0 && posted.IsEmpty && queryDueAt is null && previewDueAt is null && !queryDirty)
             {
                 return;
             }
@@ -301,12 +352,18 @@ public sealed partial class SessionBrowser : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        lifetime.Cancel();
+        lifetime.Dispose();
         queryCancellation?.Dispose();
         transcriptCancellation?.Dispose();
         screen.Dispose();
     }
 
     // ---- loop internals ----------------------------------------------------------------------
+
+    private bool IsAnimating =>
+        queryLoading || transcriptLoading || transcriptLoadingMore || refreshing || activity is not null
+        || (status is not null && statusKind == StatusKind.Busy);
 
     private void Tick()
     {
@@ -321,7 +378,7 @@ public sealed partial class SessionBrowser : IDisposable
         if (queryDueAt is { } due && now >= due)
         {
             queryDueAt = null;
-            ExecuteQuery();
+            RequestQuery();
         }
 
         if (previewDueAt is { } previewDue && now >= previewDue)
@@ -335,12 +392,42 @@ public sealed partial class SessionBrowser : IDisposable
             status = null;
             dirty = true;
         }
+
+        // Animation is driven here, not from Draw: a frame is marked dirty exactly when the
+        // spinner would show a different glyph, so the loop redraws at the spinner's cadence and
+        // not once per iteration.
+        if (IsAnimating)
+        {
+            var frame = now / SpinnerIntervalMilliseconds;
+            if (frame != lastSpinnerFrame)
+            {
+                lastSpinnerFrame = frame;
+                dirty = true;
+            }
+        }
     }
 
     private void Post(Action action)
     {
         posted.Enqueue(action);
     }
+
+    /// <summary>
+    /// An <see cref="IProgress{T}"/> that posts straight onto the loop's queue, in order.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Progress{T}"/> hands each report to the thread pool when there is no
+    /// synchronisation context, so a report raised just before an operation completed could be
+    /// delivered after the completion itself and leave a stale "indexing…" on the status bar
+    /// forever. Enqueuing inline keeps reports and completion in the order they happened.
+    /// </remarks>
+    private sealed class PostedProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
+    private PostedProgress<IndexProgress> ActivityProgress(Func<IndexProgress, string> describe) =>
+        new PostedProgress<IndexProgress>(report => Post(() => activity = describe(report)));
 
     private void Track(Task task)
     {
@@ -351,15 +438,74 @@ public sealed partial class SessionBrowser : IDisposable
         }
     }
 
-    private void SetStatus(string message, bool isError = false, int milliseconds = 3500)
+    private void SetStatus(string message, StatusKind kind = StatusKind.Info, int milliseconds = 3500)
     {
         status = message;
-        statusIsError = isError;
+        statusKind = kind;
         statusUntil = clock.ElapsedMilliseconds + milliseconds;
         dirty = true;
     }
 
     private Row? Selected => rows.Count == 0 ? null : rows[Math.Clamp(selected, 0, rows.Count - 1)];
+
+    // ---- start-up work -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Everything that should happen once the first frame is up and the user can already type:
+    /// read index facts for the header, load the embedding model so the first search is not the
+    /// slow one, and top the index up with whatever changed since the last run.
+    /// </summary>
+    private void BeginStartupWork()
+    {
+        var token = lifetime.Token;
+
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                var info = await backend.GetIndexInfoAsync(token).ConfigureAwait(false);
+                Post(() => indexInfo = info);
+
+                if (info.SemanticAvailable && searchMode != SearchMode.Lexical)
+                {
+                    Post(() => activity = "warming up semantic search");
+                    await backend.WarmUpAsync(token).ConfigureAwait(false);
+                    Post(() => activity = null);
+                }
+
+                Post(() => activity = "checking the index for new sessions");
+                var progress = ActivityProgress(report => $"indexing {report.SourceId} \u00b7 {report.Processed:N0} session(s)");
+
+                var changed = await backend.TopUpIndexAsync(progress, token).ConfigureAwait(false);
+
+                Post(() =>
+                {
+                    activity = null;
+                    if (changed)
+                    {
+                        SetStatus("index topped up with recent sessions", StatusKind.Ok, milliseconds: 4000);
+                        ScheduleQuery(immediate: true);
+                    }
+                });
+
+                var refreshed = await backend.GetIndexInfoAsync(token).ConfigureAwait(false);
+                Post(() => indexInfo = refreshed);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Post(() =>
+                {
+                    activity = null;
+                    SetStatus($"start-up: {ex.Message}", StatusKind.Error, milliseconds: 6000);
+                });
+            }
+        }, token);
+
+        Track(task);
+    }
 
     // ---- queries -----------------------------------------------------------------------------
 
@@ -382,16 +528,34 @@ public sealed partial class SessionBrowser : IDisposable
         return filter;
     }
 
+    /// <summary>Runs the current query now if nothing is running, or notes that it should run next.</summary>
+    private void RequestQuery()
+    {
+        if (queryInFlight)
+        {
+            queryDirty = true;
+            queryLoading = true;
+            dirty = true;
+            return;
+        }
+
+        ExecuteQuery();
+    }
+
     private void ExecuteQuery()
     {
-        queryCancellation?.Cancel();
         queryCancellation?.Dispose();
-        queryCancellation = new CancellationTokenSource();
+        queryCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var token = queryCancellation.Token;
         var generation = ++queryGeneration;
         var text = query.Trim();
         var isSearch = text.Length > 0;
+        var filter = BuildFilter(isSearch ? 0 : options.ListLimit);
+        var mode = searchMode;
+        var started = Stopwatch.StartNew();
 
+        queryInFlight = true;
+        queryDirty = false;
         queryLoading = true;
         queryError = null;
         dirty = true;
@@ -408,10 +572,10 @@ public sealed partial class SessionBrowser : IDisposable
                         new SearchQuery
                         {
                             Text = text,
-                            Filter = BuildFilter(0),
+                            Filter = filter,
                             Top = options.SearchLimit,
                             SnippetsPerSession = 3,
-                            Mode = searchMode
+                            Mode = mode
                         },
                         token).ConfigureAwait(false);
 
@@ -419,14 +583,15 @@ public sealed partial class SessionBrowser : IDisposable
                 }
                 else
                 {
-                    var sessions = await backend.ListAsync(BuildFilter(options.ListLimit), token).ConfigureAwait(false);
+                    var sessions = await backend.ListAsync(filter, token).ConfigureAwait(false);
                     fetched = [.. sessions.Select(session => new Row(session, null))];
                 }
 
-                Post(() => ApplyResults(generation, fetched, isSearch, text));
+                Post(() => ApplyResults(generation, fetched, isSearch, text, started.Elapsed));
             }
             catch (OperationCanceledException)
             {
+                Post(() => FinishQuery(generation));
             }
             catch (IndexNotBuiltException)
             {
@@ -441,19 +606,50 @@ public sealed partial class SessionBrowser : IDisposable
         Track(task);
     }
 
-    private void ApplyResults(int generation, IReadOnlyList<Row> fetched, bool isSearch, string text)
+    /// <summary>Marks the in-flight query finished and starts the next one if the text moved on.</summary>
+    private void FinishQuery(int generation)
     {
         if (generation != queryGeneration)
         {
             return;
         }
 
+        queryInFlight = false;
+
+        if (queryDirty)
+        {
+            ExecuteQuery();
+        }
+        else
+        {
+            queryLoading = false;
+        }
+
+        dirty = true;
+    }
+
+    private void ApplyResults(int generation, IReadOnlyList<Row> fetched, bool isSearch, string text, TimeSpan duration)
+    {
+        if (generation != queryGeneration)
+        {
+            return;
+        }
+
+        // The text moved on while this ran: do not flash an intermediate result set, just run the
+        // current text. The previous results stay on screen until the real answer arrives.
+        if (!string.Equals(text, query.Trim(), StringComparison.Ordinal))
+        {
+            FinishQuery(generation);
+            return;
+        }
+
         var previous = Selected?.Session.Ref;
 
         rows = fetched;
-        queryLoading = false;
+        hasLoadedOnce = true;
         lastQueryWasSearch = isSearch;
         lastExecutedQuery = text;
+        lastQueryDuration = duration;
 
         var keep = previous is null ? -1 : IndexOfRef(previous);
         selected = keep >= 0 ? keep : 0;
@@ -463,7 +659,7 @@ public sealed partial class SessionBrowser : IDisposable
         formattedWidth = -1;
         previewScroll = 0;
         SchedulePreview(immediate: true);
-        dirty = true;
+        FinishQuery(generation);
     }
 
     private void ApplyQueryError(int generation, string message)
@@ -473,12 +669,12 @@ public sealed partial class SessionBrowser : IDisposable
             return;
         }
 
-        queryLoading = false;
         queryError = message;
+        hasLoadedOnce = true;
         rows = [];
         selected = 0;
         listScroll = 0;
-        dirty = true;
+        FinishQuery(generation);
     }
 
     private int IndexOfRef(SessionRef reference)
@@ -530,7 +726,7 @@ public sealed partial class SessionBrowser : IDisposable
 
         transcriptCancellation?.Cancel();
         transcriptCancellation?.Dispose();
-        transcriptCancellation = new CancellationTokenSource();
+        transcriptCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var token = transcriptCancellation.Token;
         var reference = row.Session.Ref;
 
@@ -593,7 +789,7 @@ public sealed partial class SessionBrowser : IDisposable
 
         var reference = loadedRef;
         var wanted = loadedOptions with { FromTurn = next };
-        var token = transcriptCancellation?.Token ?? CancellationToken.None;
+        var token = transcriptCancellation?.Token ?? lifetime.Token;
 
         transcriptLoadingMore = true;
         dirty = true;
@@ -631,7 +827,7 @@ public sealed partial class SessionBrowser : IDisposable
                 Post(() =>
                 {
                     transcriptLoadingMore = false;
-                    SetStatus(ex.Message, isError: true);
+                    SetStatus(ex.Message, StatusKind.Error);
                 });
             }
         }, token);

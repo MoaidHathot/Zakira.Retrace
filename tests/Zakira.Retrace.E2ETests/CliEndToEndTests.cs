@@ -259,11 +259,13 @@ public sealed class CliEndToEndTests
         copilot.GetProperty("indexByDefault").GetBoolean().Should().BeFalse();
 
         // Whether or not the harness is installed on this machine, the build must report the
-        // source as skipped for the configured reason rather than reading it.
-        var build = await runner.RunAsync("index", "build", "--no-embed", "--source", "copilot-cli", "--output", "json");
+        // source as skipped for the configured reason rather than reading it. Both builds are
+        // scoped to the last hour: the policy does not depend on volume, and these run against
+        // whatever real stores the machine has.
+        var build = await runner.RunAsync("index", "build", "--no-embed", "--since", "1h", "--source", "copilot-cli", "--output", "json");
         build.ExitCode.Should().Be(0);
 
-        var unscoped = await runner.RunAsync("index", "build", "--no-embed", "--output", "json");
+        var unscoped = await runner.RunAsync("index", "build", "--no-embed", "--since", "1h", "--output", "json");
         unscoped.ExitCode.Should().Be(0);
         using var buildDocument = JsonDocument.Parse(unscoped.StandardOutput);
         var skipped = buildDocument.RootElement.GetProperty("sources").EnumerateArray()

@@ -12,7 +12,13 @@ public enum QueryMode
     Indexed,
 
     /// <summary>Bypass the index and read the sources directly. Always current, always slower.</summary>
-    Live
+    Live,
+
+    /// <summary>
+    /// Use the index exactly as it stands and never refresh inline. For interactive front ends that
+    /// run the top-up themselves, in the background, and must answer every keystroke promptly.
+    /// </summary>
+    IndexOnly
 }
 
 /// <summary>The outcome of probing one source, with the configuration that applies to it.</summary>
@@ -104,9 +110,13 @@ public sealed class SessionCatalog(
     /// <summary>Lists sessions.</summary>
     public async Task<IReadOnlyList<SessionSummary>> ListAsync(SessionFilter filter, QueryMode mode, CancellationToken cancellationToken)
     {
-        if (mode == QueryMode.Indexed && searcher.Exists)
+        if (mode is QueryMode.Indexed or QueryMode.IndexOnly && searcher.Exists)
         {
-            await RefreshIfStaleAsync(cancellationToken).ConfigureAwait(false);
+            if (mode == QueryMode.Indexed)
+            {
+                await TopUpIfStaleAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return await searcher.ListAsync(filter, cancellationToken).ConfigureAwait(false);
         }
 
@@ -116,14 +126,18 @@ public sealed class SessionCatalog(
     /// <summary>Runs a content search.</summary>
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, QueryMode mode, CancellationToken cancellationToken)
     {
-        if (mode == QueryMode.Indexed)
+        if (mode is QueryMode.Indexed or QueryMode.IndexOnly)
         {
             if (!searcher.Exists)
             {
                 throw new IndexNotBuiltException(searcher.IndexPath);
             }
 
-            await RefreshIfStaleAsync(cancellationToken).ConfigureAwait(false);
+            if (mode == QueryMode.Indexed)
+            {
+                await TopUpIfStaleAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return await searcher.SearchAsync(query, cancellationToken).ConfigureAwait(false);
         }
 
@@ -229,27 +243,36 @@ public sealed class SessionCatalog(
     ///   <item><description>A hard deadline. Whatever completes is committed, whatever does not is
     ///   reported through <see cref="PendingSources"/>, and the query answers either way.</description></item>
     /// </list>
+    /// <para>
+    /// Public so an interactive front end can run it in the background instead of in front of its
+    /// first query. Returns <see langword="true"/> when something was actually indexed, which is
+    /// the caller's cue to re-run whatever it is showing.
+    /// </para>
     /// </remarks>
-    private async Task RefreshIfStaleAsync(CancellationToken cancellationToken)
+    /// <param name="progress">Receives per-source progress while sessions are being indexed.</param>
+    /// <param name="cancellationToken">Cancels the whole operation; sessions already committed stay committed.</param>
+    public async Task<bool> TopUpIfStaleAsync(IProgress<IndexProgress>? progress, CancellationToken cancellationToken)
     {
         PendingSources = [];
 
-        if (!config.Index.AutoRefresh)
+        if (!config.Index.AutoRefresh || !searcher.Exists)
         {
-            return;
+            return false;
         }
-
-        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
 
         // Rate-limit the staleness probe itself. Without this, a script running many queries in a
         // row would re-probe every source on each one, and probing means opening every session
-        // database.
-        if (status.LastRefresh is { } last
-            && DateTimeOffset.UtcNow - last < TimeSpan.FromMinutes(Math.Max(config.Index.AutoRefreshMinIntervalMinutes, 0)))
+        // database. The timestamp is read on its own because the full status report aggregates
+        // vector coverage over every chunk, which is far too expensive for a check that is meant
+        // to be skipped most of the time.
+        var last = await searcher.GetLastRefreshAsync(cancellationToken).ConfigureAwait(false);
+        if (last is { } lastRefresh
+            && DateTimeOffset.UtcNow - lastRefresh < TimeSpan.FromMinutes(Math.Max(config.Index.AutoRefreshMinIntervalMinutes, 0)))
         {
-            return;
+            return false;
         }
 
+        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         var stale = new List<string>();
 
         // Only sources indexed by default are considered. A source the user took out of the
@@ -280,7 +303,7 @@ public sealed class SessionCatalog(
 
         if (stale.Count == 0)
         {
-            return;
+            return false;
         }
 
         logger.LogInformation("Topping up the index for {Sources}.", string.Join(", ", stale));
@@ -293,13 +316,15 @@ public sealed class SessionCatalog(
             deadline.CancelAfter(TimeSpan.FromSeconds(budget));
         }
 
+        IndexBuildResult? result = null;
         try
         {
-            await builder.BuildAsync(
+            result = await builder.BuildAsync(
                 new IndexBuildOptions
                 {
                     SourceIds = stale,
-                    Embed = config.Index.AutoRefreshEmbed
+                    Embed = config.Index.AutoRefreshEmbed,
+                    Progress = progress
                 },
                 deadline.Token).ConfigureAwait(false);
         }
@@ -313,14 +338,17 @@ public sealed class SessionCatalog(
                 "Index top-up hit its {Budget}s budget; {Sources} may be behind.",
                 budget,
                 string.Join(", ", stale));
-            return;
+            return true;
         }
 
         // Completing inside the budget does not by itself mean the source is now exhaustive: a
         // scoped or partially failed build can also finish early. Re-check the watermarks rather
         // than assume.
         PendingSources = await FindStaleSourcesAsync(stale, cancellationToken).ConfigureAwait(false);
+        return result.SessionsIndexed > 0 || result.SessionsRemoved > 0;
     }
+
+    private Task<bool> TopUpIfStaleAsync(CancellationToken cancellationToken) => TopUpIfStaleAsync(progress: null, cancellationToken);
 
     /// <summary>Re-probes the given sources and returns those whose watermark still differs.</summary>
     private async Task<IReadOnlyList<string>> FindStaleSourcesAsync(IReadOnlyList<string> candidates, CancellationToken cancellationToken)

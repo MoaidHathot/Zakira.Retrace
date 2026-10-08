@@ -10,6 +10,7 @@ using Zakira.Retrace.Core.Json;
 using Zakira.Retrace.Core.Services;
 using Zakira.Retrace.Mcp;
 using Zakira.Retrace.Tui;
+using Zakira.Retrace.Tui.Terminal;
 
 namespace Zakira.Retrace.Cli;
 
@@ -130,10 +131,15 @@ public static class CliApp
                     + "or `retrace tui --pick ...` inside a command substitution so it can draw on stderr.");
             }
 
+            // Built once for the whole session, so the embedding model is loaded a single time
+            // instead of on every keystroke's search.
+            host.LongLived = true;
+
             var config = await host.GetConfigAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await host.GetServiceAsync<SessionCatalog>(cancellationToken).ConfigureAwait(false);
             var tags = await host.GetServiceAsync<TagStore>(cancellationToken).ConfigureAwait(false);
             var searcher = await host.GetServiceAsync<IndexSearcher>(cancellationToken).ConfigureAwait(false);
+            var embeddings = await host.GetServiceAsync<IEmbeddingProviderFactory>(cancellationToken).ConfigureAwait(false);
 
             var browserOptions = new BrowserOptions
             {
@@ -147,11 +153,13 @@ public static class CliApp
                 ShowReasoning = config.Tui.ShowReasoning,
                 ListLimit = config.Tui.ListLimit,
                 SearchLimit = config.Tui.SearchLimit,
-                RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase)
+                RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase),
+                ColorDepth = TerminalScreen.ParseColorDepth(config.Tui.ColorDepth),
+                Version = RetraceVersion.Current
             };
 
             BrowserResult outcome;
-            using (var browser = new SessionBrowser(new CatalogBrowserBackend(catalog, tags, searcher, config), browserOptions))
+            using (var browser = new SessionBrowser(new CatalogBrowserBackend(catalog, tags, searcher, embeddings, config), browserOptions))
             {
                 outcome = browser.Run(cancellationToken);
             }
