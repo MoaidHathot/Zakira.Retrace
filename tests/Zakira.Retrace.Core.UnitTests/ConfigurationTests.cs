@@ -6,6 +6,12 @@ namespace Zakira.Retrace.Core.UnitTests;
 /// <summary>
 /// Covers path resolution and the config file's read/write/mutate cycle.
 /// </summary>
+/// <remarks>
+/// Path resolution is tested against a scripted environment, but it still runs through the host's
+/// <see cref="Path"/> APIs, so the fake roots follow the host's conventions: drive letters and
+/// backslashes on Windows, a <c>/home</c> tree elsewhere. The rules under test are the same on
+/// every platform; only the shape of the strings differs.
+/// </remarks>
 public sealed class ConfigurationTests
 {
     /// <summary>A fully scriptable environment, so path tests never touch the real machine.</summary>
@@ -17,111 +23,140 @@ public sealed class ConfigurationTests
 
         public string TempPath { get; set; } = Path.Combine(Path.GetTempPath(), "fake");
 
-        public bool IsWindows { get; set; } = true;
+        public bool IsWindows { get; set; } = OperatingSystem.IsWindows();
 
-        public bool IsMacOs { get; set; }
+        public bool IsMacOs { get; set; } = OperatingSystem.IsMacOS();
 
         public string? GetEnvironmentVariable(string name) => Variables.GetValueOrDefault(name);
 
-        public string GetFolderPath(Environment.SpecialFolder folder) => Folders.GetValueOrDefault(folder, @"C:\fallback");
+        public string GetFolderPath(Environment.SpecialFolder folder) => Folders.GetValueOrDefault(folder, Fallback);
 
         public string GetTempPath() => TempPath;
     }
 
-    private static FakeEnvironment WindowsEnvironment() => new()
+    private static readonly bool OnWindows = OperatingSystem.IsWindows();
+
+    private static string Fallback => OnWindows ? @"C:\fallback" : "/fallback";
+
+    private static string Profile => OnWindows ? @"C:\Users\test" : "/home/test";
+
+    private static string Roaming => OnWindows ? @"C:\Users\test\AppData\Roaming" : "/home/test/.config";
+
+    private static string LocalAppData => OnWindows ? @"C:\Users\test\AppData\Local" : "/home/test/.local/share";
+
+    private static string Dotfiles => OnWindows ? @"P:\dotfiles\config" : "/dotfiles/config";
+
+    private static string DataRoot => OnWindows ? @"P:\data" : "/data";
+
+    private static string CustomConfig => OnWindows ? @"D:\custom\my-retrace.json" : "/custom/my-retrace.json";
+
+    private static string Cache => OnWindows ? @"E:\retrace-cache" : "/retrace-cache";
+
+    /// <summary>Where the platform puts config and data when nothing overrides it.</summary>
+    private static string PlatformConfigRoot => OnWindows
+        ? Roaming
+        : OperatingSystem.IsMacOS() ? Path.Combine(Profile, "Library", "Application Support") : Path.Combine(Profile, ".config");
+
+    private static string PlatformDataRoot => OnWindows
+        ? LocalAppData
+        : OperatingSystem.IsMacOS() ? Path.Combine(Profile, "Library", "Application Support") : Path.Combine(Profile, ".local", "share");
+
+    private static FakeEnvironment HostEnvironment() => new()
     {
         Folders =
         {
-            [Environment.SpecialFolder.ApplicationData] = @"C:\Users\test\AppData\Roaming",
-            [Environment.SpecialFolder.LocalApplicationData] = @"C:\Users\test\AppData\Local",
-            [Environment.SpecialFolder.UserProfile] = @"C:\Users\test"
+            [Environment.SpecialFolder.ApplicationData] = Roaming,
+            [Environment.SpecialFolder.LocalApplicationData] = LocalAppData,
+            [Environment.SpecialFolder.UserProfile] = Profile
         }
     };
 
     [Fact]
     public void Config_lands_in_XDG_CONFIG_HOME_when_it_is_set()
     {
-        var environment = WindowsEnvironment();
-        environment.Variables["XDG_CONFIG_HOME"] = @"P:\dotfiles\config";
+        var environment = HostEnvironment();
+        environment.Variables["XDG_CONFIG_HOME"] = Dotfiles;
 
         var paths = new RetracePaths(environment);
 
         // The whole point of preferring XDG here is that the config file ends up in the user's
         // versioned dotfiles alongside the other tools' configuration.
-        paths.ConfigFilePath.Should().Be(@"P:\dotfiles\config\Zakira.Retrace\retrace.json");
-        paths.ConfigRoot.Should().Be(@"P:\dotfiles\config");
+        paths.ConfigFilePath.Should().Be(Path.Combine(Dotfiles, "Zakira.Retrace", "retrace.json"));
+        paths.ConfigRoot.Should().Be(Dotfiles);
     }
 
     [Fact]
     public void Config_root_normalises_relative_segments_and_mixed_separators()
     {
-        var environment = WindowsEnvironment();
+        var environment = HostEnvironment();
 
         // This is the literal shape a real dotfiles setup produces.
-        environment.Variables["XDG_CONFIG_HOME"] = @"P:\dotfiles\configurations/../config/";
+        environment.Variables["XDG_CONFIG_HOME"] = OnWindows ? @"P:\dotfiles\configurations/../config/" : "/dotfiles/configurations/../config/";
 
         var paths = new RetracePaths(environment);
 
-        paths.ConfigRoot.Should().Be(@"P:\dotfiles\config");
-        paths.ConfigFilePath.Should().Be(@"P:\dotfiles\config\Zakira.Retrace\retrace.json");
+        paths.ConfigRoot.Should().Be(Dotfiles);
+        paths.ConfigFilePath.Should().Be(Path.Combine(Dotfiles, "Zakira.Retrace", "retrace.json"));
     }
 
     [Fact]
     public void Config_falls_back_to_the_platform_location_without_XDG()
     {
-        var paths = new RetracePaths(WindowsEnvironment());
+        var paths = new RetracePaths(HostEnvironment());
 
-        paths.ConfigFilePath.Should().Be(@"C:\Users\test\AppData\Roaming\Zakira.Retrace\retrace.json");
+        paths.ConfigFilePath.Should().Be(Path.Combine(PlatformConfigRoot, "Zakira.Retrace", "retrace.json"));
     }
 
     [Fact]
     public void RETRACE_CONFIG_PATH_overrides_everything()
     {
-        var environment = WindowsEnvironment();
-        environment.Variables["XDG_CONFIG_HOME"] = @"P:\dotfiles\config";
-        environment.Variables["RETRACE_CONFIG_PATH"] = @"D:\custom\my-retrace.json";
+        var environment = HostEnvironment();
+        environment.Variables["XDG_CONFIG_HOME"] = Dotfiles;
+        environment.Variables["RETRACE_CONFIG_PATH"] = CustomConfig;
 
         var paths = new RetracePaths(environment);
 
-        paths.ConfigFilePath.Should().Be(@"D:\custom\my-retrace.json");
-        paths.ConfigDirectory.Should().Be(@"D:\custom");
+        paths.ConfigFilePath.Should().Be(CustomConfig);
+        paths.ConfigDirectory.Should().Be(Path.GetDirectoryName(CustomConfig));
     }
 
     [Fact]
     public void Data_directory_is_separate_from_config_and_lives_in_local_app_data()
     {
-        var environment = WindowsEnvironment();
-        environment.Variables["XDG_CONFIG_HOME"] = @"P:\dotfiles\config";
+        var environment = HostEnvironment();
+        environment.Variables["XDG_CONFIG_HOME"] = Dotfiles;
 
         var paths = new RetracePaths(environment);
 
         // The index and downloaded models are large, machine-specific, and rebuildable, so they
         // must never end up inside synchronised dotfiles.
-        paths.DataDirectory.Should().Be(@"C:\Users\test\AppData\Local\Zakira.Retrace");
+        paths.DataDirectory.Should().Be(Path.Combine(PlatformDataRoot, "Zakira.Retrace"));
         paths.DataDirectory.Should().NotStartWith(paths.ConfigRoot);
-        paths.DefaultIndexPath.Should().Be(@"C:\Users\test\AppData\Local\Zakira.Retrace\index.db");
+        paths.DefaultIndexPath.Should().Be(Path.Combine(PlatformDataRoot, "Zakira.Retrace", "index.db"));
     }
 
     [Fact]
     public void Data_directory_honours_XDG_DATA_HOME_and_its_own_override()
     {
-        var environment = WindowsEnvironment();
-        environment.Variables["XDG_DATA_HOME"] = @"P:\data";
+        var environment = HostEnvironment();
+        environment.Variables["XDG_DATA_HOME"] = DataRoot;
 
-        new RetracePaths(environment).DataDirectory.Should().Be(@"P:\data\Zakira.Retrace");
+        new RetracePaths(environment).DataDirectory.Should().Be(Path.Combine(DataRoot, "Zakira.Retrace"));
 
-        environment.Variables["RETRACE_DATA_DIRECTORY"] = @"E:\retrace-cache";
-        new RetracePaths(environment).DataDirectory.Should().Be(@"E:\retrace-cache");
+        environment.Variables["RETRACE_DATA_DIRECTORY"] = Cache;
+        new RetracePaths(environment).DataDirectory.Should().Be(Cache);
     }
 
     [Theory]
-    [InlineData("$XDG_CONFIG_HOME/skills", @"P:\dotfiles\config\skills")]
-    [InlineData("${XDG_CONFIG_HOME}/skills", @"P:\dotfiles\config\skills")]
-    [InlineData("~/notes", @"C:\Users\test\notes")]
-    public void Expand_path_resolves_the_variables_a_dotfiles_setup_uses(string input, string expected)
+    [InlineData("$XDG_CONFIG_HOME/skills", "skills")]
+    [InlineData("${XDG_CONFIG_HOME}/skills", "skills")]
+    [InlineData("~/notes", "notes")]
+    public void Expand_path_resolves_the_variables_a_dotfiles_setup_uses(string input, string leaf)
     {
-        var environment = WindowsEnvironment();
-        environment.Variables["XDG_CONFIG_HOME"] = @"P:\dotfiles\config";
+        var environment = HostEnvironment();
+        environment.Variables["XDG_CONFIG_HOME"] = Dotfiles;
+
+        var expected = input.StartsWith('~') ? Path.Combine(Profile, leaf) : Path.Combine(Dotfiles, leaf);
 
         // Values are stored verbatim so the same config works on every machine; expansion happens
         // at read time.
@@ -132,7 +167,7 @@ public sealed class ConfigurationTests
     public async Task Generated_config_contains_every_option_including_nulls()
     {
         using var temp = new TempDirectory();
-        var paths = new RetracePaths(WindowsEnvironment());
+        var paths = new RetracePaths(HostEnvironment());
         var store = new ConfigStore(paths, Path.Combine(temp.Path, "retrace.json"));
 
         await store.EnsureExistsAsync(TestContext.Current.CancellationToken);
@@ -160,7 +195,7 @@ public sealed class ConfigurationTests
     public async Task Config_round_trips_through_save_and_load()
     {
         using var temp = new TempDirectory();
-        var store = new ConfigStore(new RetracePaths(WindowsEnvironment()), Path.Combine(temp.Path, "retrace.json"));
+        var store = new ConfigStore(new RetracePaths(HostEnvironment()), Path.Combine(temp.Path, "retrace.json"));
 
         var original = new RetraceConfig();
         original.Search.RrfK = 42;
@@ -233,7 +268,7 @@ public sealed class ConfigurationTests
         var path = Path.Combine(temp.Path, "retrace.json");
         await File.WriteAllTextAsync(path, "{ this is not json", TestContext.Current.CancellationToken);
 
-        var store = new ConfigStore(new RetracePaths(WindowsEnvironment()), path);
+        var store = new ConfigStore(new RetracePaths(HostEnvironment()), path);
 
         var act = async () => await store.LoadAsync(TestContext.Current.CancellationToken);
 
@@ -245,7 +280,7 @@ public sealed class ConfigurationTests
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "absent.json");
-        var store = new ConfigStore(new RetracePaths(WindowsEnvironment()), path);
+        var store = new ConfigStore(new RetracePaths(HostEnvironment()), path);
 
         var config = await store.LoadAsync(TestContext.Current.CancellationToken);
 

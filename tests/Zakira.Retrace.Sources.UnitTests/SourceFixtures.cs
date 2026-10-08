@@ -288,8 +288,10 @@ internal static class SourceFixtures
         Directory.CreateDirectory(chatSessions);
 
         // The folder is stored as a percent-encoded file URI, which is what makes hash-to-path
-        // resolution non-trivial.
-        var uri = "file:///" + workspaceFolder.Replace('\\', '/').Replace(":", "%3A", StringComparison.Ordinal);
+        // resolution non-trivial. VS Code writes file:///C%3A/x on Windows and file:///home/x on
+        // Unix: the drive letter is encoded, and a Unix path already carries its leading slash.
+        var encoded = workspaceFolder.Replace('\\', '/').Replace(":", "%3A", StringComparison.Ordinal);
+        var uri = "file://" + (encoded.StartsWith('/') ? string.Empty : "/") + encoded;
         File.WriteAllText(
             Path.Combine(workspace, "workspace.json"),
             JsonSerializer.Serialize(new { folder = uri }));
