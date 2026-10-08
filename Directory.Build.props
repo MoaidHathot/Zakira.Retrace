@@ -40,7 +40,7 @@
       ./pack.ps1 (or ./pack.ps1 -Push). The release script intentionally does NOT expose
       a -Version override: the only way to change what ships is to change this file.
     -->
-    <VersionPrefix>0.2.0</VersionPrefix>
+    <VersionPrefix>0.3.0</VersionPrefix>
   </PropertyGroup>
 
   <PropertyGroup Label="Repository metadata">
