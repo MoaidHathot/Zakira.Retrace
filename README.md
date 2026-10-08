@@ -514,6 +514,15 @@ dotnet test Zakira.Retrace.slnx
 
 Requires the .NET 10 SDK.
 
+The repository's `NuGet.config` maps packages to the private proxy feeds configured on the
+maintainer's machines and does not declare nuget.org. On a machine with ordinary nuget.org access
+— which is what CI uses — restore with the CI configuration instead:
+
+```bash
+dotnet restore Zakira.Retrace.slnx --configfile .github/nuget.ci.config
+dotnet build Zakira.Retrace.slnx --no-restore
+```
+
 ## License
 
 The Unlicense. See [LICENSE](LICENSE).

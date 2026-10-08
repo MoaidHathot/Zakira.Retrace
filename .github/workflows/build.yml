@@ -28,7 +28,9 @@ jobs:
           global-json-file: global.json
 
       - name: Restore
-        run: dotnet restore Zakira.Retrace.slnx
+        # The repo's NuGet.config maps packages to feeds only developer machines can reach; the
+        # CI config points at nuget.org instead. --configfile makes NuGet use that file alone.
+        run: dotnet restore Zakira.Retrace.slnx --configfile .github/nuget.ci.config
 
       - name: Build
         run: dotnet build Zakira.Retrace.slnx --configuration Release --no-restore
@@ -59,8 +61,11 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Restore
+        run: dotnet restore Zakira.Retrace.slnx --configfile .github/nuget.ci.config
+
       - name: Pack
-        run: dotnet pack Zakira.Retrace.slnx --configuration Release --output artifacts
+        run: dotnet pack Zakira.Retrace.slnx --configuration Release --no-restore --output artifacts
 
       - name: Upload package
         uses: actions/upload-artifact@v4
