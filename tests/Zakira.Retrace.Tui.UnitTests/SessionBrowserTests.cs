@@ -89,6 +89,7 @@ public sealed class SessionBrowserTests
         // Force the first search to start, then type more while it is in flight.
         browser.Type("in");
         browser.ForceDueQueriesForTest();
+        await backend.SearchStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
         browser.Type("tegration");
         browser.ForceDueQueriesForTest();
         browser.Type(" test");

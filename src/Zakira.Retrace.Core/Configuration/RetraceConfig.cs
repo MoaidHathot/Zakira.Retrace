@@ -49,6 +49,9 @@ public sealed class RetraceConfig
 /// <summary>Per-source settings, keyed by the source ids used everywhere else.</summary>
 public sealed class SourcesConfig
 {
+    /// <summary>Source ids with a configuration block.</summary>
+    public static IReadOnlyList<string> Ids { get; } = ["opencode", "copilot-cli", "copilot-vscode"];
+
     /// <summary>OpenCode.</summary>
     [JsonPropertyName("opencode")]
     public OpenCodeSourceConfig OpenCode { get; set; } = new();
@@ -449,6 +452,10 @@ public sealed class TuiConfig
     [JsonPropertyName("showReasoning")]
     public bool ShowReasoning { get; set; }
 
+    /// <summary>Render Markdown and code styling in the preview and reader. Toggle with v.</summary>
+    [JsonPropertyName("richPreview")]
+    public bool RichPreview { get; set; } = true;
+
     /// <summary>Sessions fetched for the browse list when no query is typed.</summary>
     [JsonPropertyName("listLimit")]
     public int ListLimit { get; set; } = 200;
@@ -456,4 +463,8 @@ public sealed class TuiConfig
     /// <summary>Results fetched per search.</summary>
     [JsonPropertyName("searchLimit")]
     public int SearchLimit { get; set; } = 50;
+
+    /// <summary>Idle time before a typed TUI query runs, in milliseconds (0–1000).</summary>
+    [JsonPropertyName("searchDebounceMilliseconds")]
+    public int SearchDebounceMilliseconds { get; set; } = 120;
 }

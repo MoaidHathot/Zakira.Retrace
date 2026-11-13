@@ -202,8 +202,43 @@ public sealed class SourceFixtureTests
         transcript.Turns.Select(turn => turn.Role).Should().ContainInOrder(
             TurnRole.User, TurnRole.Assistant, TurnRole.User, TurnRole.Assistant, TurnRole.User, TurnRole.Assistant);
         transcript.Turns[1].Model.Should().Be("claude-opus-4.8");
-        transcript.TotalTurns.Should().Be(3, "TotalTurns counts source exchanges, not expanded turns");
+        transcript.TotalTurns.Should().Be(6, "the count and page cursors use the same normalized turns as the reader");
         transcript.Files.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task CopilotCli_pages_without_repeating_turn_indices_or_losing_half_an_exchange()
+    {
+        using var temp = SourceFixtures.NewDirectory();
+        var dataDirectory = temp.Combine("copilot");
+        SourceFixtures.CreateCopilotCliDatabase(dataDirectory, sessions: 1, turnsPerSession: 3, emptySessions: 0);
+        var source = CreateCopilotCli(dataDirectory);
+        const string id = "00000000-0000-0000-0000-000000000000";
+        var full = (await source.GetAsync(id, TranscriptOptions.Default, TestContext.Current.CancellationToken))!;
+
+        var collected = new List<Turn>();
+        int? next = null;
+        for (var pageNumber = 0; pageNumber < 6; pageNumber++)
+        {
+            var page = (await source.GetAsync(id, new TranscriptOptions { FromTurn = next, MaxCharacters = 1 }, TestContext.Current.CancellationToken))!;
+            page.TotalTurns.Should().Be(6);
+            collected.AddRange(page.Turns);
+            if (!page.IsTruncated)
+            {
+                break;
+            }
+
+            page.NextTurnIndex.Should().BeGreaterThan(next ?? 0);
+            next = page.NextTurnIndex;
+        }
+
+        collected.Select(turn => turn.Index).Should().Equal(0, 1, 2, 3, 4, 5);
+        collected.Select(turn => turn.PlainText).Should().Equal(full.Turns.Select(turn => turn.PlainText));
+
+        var window = (await source.GetAsync(id, new TranscriptOptions { FromTurn = 1, ToTurn = 2 }, TestContext.Current.CancellationToken))!;
+        window.Turns.Select(turn => turn.Index).Should().Equal(1, 2);
+        window.Turns.Select(turn => turn.Role).Should().Equal(TurnRole.Assistant, TurnRole.User);
+        window.NextTurnIndex.Should().Be(3);
     }
 
     [Fact]
@@ -288,6 +323,31 @@ public sealed class SourceFixtureTests
         assistant.Blocks.OfType<ReasoningBlock>().Should().ContainSingle();
 
         transcript.Files.Should().Contain(file => file.Path.EndsWith("RetryOptions.cs", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task VsCode_paging_preserves_message_indices_in_both_store_formats(bool deltaLog)
+    {
+        using var temp = SourceFixtures.NewDirectory();
+        var workspace = temp.Combine("Repo");
+        Directory.CreateDirectory(workspace);
+        var (_, jsonId, deltaId) = SourceFixtures.CreateVsCodeWorkspaceStorage(temp.Path, workspace);
+        var source = CreateVsCode(temp.Path);
+        var id = deltaLog ? deltaId : jsonId;
+        var first = (await source.GetAsync(id, TranscriptOptions.Full with { MaxCharacters = 1 }, TestContext.Current.CancellationToken))!;
+        first.TotalTurns.Should().Be(2);
+        first.Turns.Should().ContainSingle().Which.Index.Should().Be(0);
+        first.NextTurnIndex.Should().Be(1);
+        first.IsTruncated.Should().BeTrue();
+
+        var second = (await source.GetAsync(id, TranscriptOptions.Full with { MaxCharacters = 1, FromTurn = first.NextTurnIndex }, TestContext.Current.CancellationToken))!;
+        second.TotalTurns.Should().Be(2);
+        second.Turns.Should().ContainSingle().Which.Index.Should().Be(1);
+        second.Turns[0].Role.Should().Be(TurnRole.Assistant);
+        second.IsTruncated.Should().BeFalse();
+        second.NextTurnIndex.Should().BeNull();
     }
 
     [Fact]

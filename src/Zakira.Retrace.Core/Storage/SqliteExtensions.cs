@@ -10,6 +10,20 @@ namespace Zakira.Retrace.Core.Storage;
 /// </summary>
 public static class SqliteExtensions
 {
+    /// <summary>
+    /// Makes work inside SQLite cancellable on this dedicated connection. Microsoft.Data.Sqlite's
+    /// async methods only check before execution, and SqliteCommand.Cancel is a no-op. The native
+    /// progress callback also checks during a long FTS scan or sort, on SQLite's own thread.
+    /// </summary>
+    public static void EnableQueryCancellation(this SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.CanBeCanceled)
+        {
+            SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 1000,
+                static state => ((CancellationToken)state).IsCancellationRequested ? 1 : 0, cancellationToken);
+        }
+    }
+
     /// <summary>Creates a command with parameters bound from a name/value sequence.</summary>
     public static SqliteCommand CreateCommand(this SqliteConnection connection, string sql, params (string Name, object? Value)[] parameters)
     {

@@ -96,7 +96,7 @@ public sealed class CopilotCliSessionSource : ISessionSource, IIncrementalSource
     public async ValueTask<SessionTranscript?> GetAsync(string nativeId, TranscriptOptions options, CancellationToken cancellationToken)
     {
         var transcript = await reader.GetAsync(nativeId, options, cancellationToken).ConfigureAwait(false);
-        if (transcript is null || !options.IncludeToolOutput)
+        if (transcript is null || !options.IncludeToolOutput || transcript.IsTruncated)
         {
             return transcript;
         }
@@ -107,7 +107,7 @@ public sealed class CopilotCliSessionSource : ISessionSource, IIncrementalSource
             .ReadToolCallsAsync(layout.GetEventLogPath(nativeId), options.MaxToolOutputCharacters, cancellationToken)
             .ConfigureAwait(false);
 
-        if (toolCalls.Count == 0)
+        if (toolCalls.Count == 0 || options.FromTurn > transcript.TotalTurns || options.ToTurn < transcript.TotalTurns)
         {
             return transcript;
         }
@@ -115,7 +115,7 @@ public sealed class CopilotCliSessionSource : ISessionSource, IIncrementalSource
         var turns = transcript.Turns.ToList();
         turns.Add(new Turn
         {
-            Index = turns.Count,
+            Index = transcript.TotalTurns,
             Role = TurnRole.Tool,
             Timestamp = turns.Count > 0 ? turns[^1].Timestamp : null,
             Blocks = [.. toolCalls]
@@ -124,6 +124,7 @@ public sealed class CopilotCliSessionSource : ISessionSource, IIncrementalSource
         return transcript with
         {
             Turns = turns,
+            TotalTurns = transcript.TotalTurns + 1,
             Summary = transcript.Summary with
             {
                 Stats = transcript.Summary.Stats with { ToolCallCount = toolCalls.Count }

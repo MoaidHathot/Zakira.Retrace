@@ -131,8 +131,10 @@ public sealed class OnnxEmbeddingProvider : IEmbeddingProvider
         List<float[]> vectors;
         lock (inferenceGate)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var inputs = BuildInputs(inputIds, attentionMask, tokenTypeIds, batchSize, sequenceLength);
             using var outputs = session.Run(inputs);
+            cancellationToken.ThrowIfCancellationRequested();
             vectors = Pool(outputs, attentionMask, batchSize, sequenceLength);
         }
 

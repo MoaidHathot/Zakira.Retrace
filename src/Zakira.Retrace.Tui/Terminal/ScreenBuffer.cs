@@ -168,6 +168,11 @@ public sealed class ScreenBuffer
 
         foreach (var rune in text.EnumerateRunes())
         {
+            if (Rune.IsControl(rune))
+            {
+                continue;
+            }
+
             var runeWidth = TextWidth.Of(rune);
 
             if (runeWidth == 0)

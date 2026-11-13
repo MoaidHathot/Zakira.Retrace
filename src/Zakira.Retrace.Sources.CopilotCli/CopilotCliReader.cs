@@ -198,10 +198,11 @@ internal sealed class CopilotCliReader(string databasePath, string snapshotDirec
         }
 
         var turns = new List<Turn>();
-        var totalExchanges = 0;
+        var totalTurns = 0;
         var characters = 0;
         var truncated = false;
         int? nextTurn = null;
+        var exchangeStarts = new Dictionary<int, int>();
 
         await using (var command = database.Connection.CreateCommand())
         {
@@ -216,62 +217,19 @@ internal sealed class CopilotCliReader(string databasePath, string snapshotDirec
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                totalExchanges++;
-
                 var turnIndex = (int)reader.GetInt64(0);
-                if (options.FromTurn is { } from && turnIndex < from)
-                {
-                    continue;
-                }
-
-                if (options.ToTurn is { } to && turnIndex > to)
-                {
-                    nextTurn ??= turnIndex;
-                    truncated = true;
-                    continue;
-                }
+                exchangeStarts[turnIndex] = totalTurns;
 
                 var userMessage = reader.GetNullableString(1);
                 var assistantResponse = reader.GetNullableString(2);
                 var timestamp = SqliteExtensions.ParseSqliteDateTime(reader.GetNullableString(3));
                 usageByTurn.TryGetValue(turnIndex, out var turnUsage);
 
-                if (options.MaxCharacters > 0)
-                {
-                    characters += (userMessage?.Length ?? 0) + (assistantResponse?.Length ?? 0);
-                    if (characters > options.MaxCharacters && turns.Count > 0)
-                    {
-                        nextTurn = turnIndex;
-                        truncated = true;
-                        break;
-                    }
-                }
-
                 // Copilot CLI stores an exchange as a single row. The shared model represents a
-                // conversation as alternating turns, so each row expands into up to two.
-                if (!string.IsNullOrWhiteSpace(userMessage))
-                {
-                    turns.Add(new Turn
-                    {
-                        Index = turns.Count,
-                        Role = TurnRole.User,
-                        Timestamp = timestamp,
-                        Blocks = [new TextBlock(userMessage)]
-                    });
-                }
-
-                if (!string.IsNullOrWhiteSpace(assistantResponse))
-                {
-                    turns.Add(new Turn
-                    {
-                        Index = turns.Count,
-                        Role = TurnRole.Assistant,
-                        Timestamp = timestamp,
-                        Model = turnUsage.Model,
-                        Agent = turnUsage.AgentId,
-                        Blocks = [new TextBlock(assistantResponse)]
-                    });
-                }
+                // conversation as messages. Cursors and indices use that same coordinate system,
+                // including pages beginning halfway through an exchange and user-only sessions.
+                AddMessage(userMessage, TurnRole.User, timestamp, null, null);
+                AddMessage(assistantResponse, TurnRole.Assistant, timestamp, turnUsage.Model, turnUsage.AgentId);
             }
         }
 
@@ -282,15 +240,42 @@ internal sealed class CopilotCliReader(string databasePath, string snapshotDirec
         {
             Summary = summary with
             {
-                Stats = summary.Stats with { MessageCount = summary.Stats.MessageCount ?? totalExchanges }
+                Stats = summary.Stats with { MessageCount = totalTurns }
             },
             Turns = turns,
-            Files = files,
-            References = references,
-            TotalTurns = totalExchanges,
+            Files = [.. files.Select(file => file with { TurnIndex = MapIndex(file.TurnIndex) })],
+            References = [.. references.Select(reference => reference with { TurnIndex = MapIndex(reference.TurnIndex) })],
+            TotalTurns = totalTurns,
             NextTurnIndex = nextTurn,
             IsTruncated = truncated
         };
+
+        int? MapIndex(int? index) => index is { } exchange && exchangeStarts.TryGetValue(exchange, out var first) ? first : null;
+
+        void AddMessage(string? text, TurnRole role, DateTimeOffset? timestamp, string? model, string? agent)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return;
+            }
+
+            var index = totalTurns++;
+            if (options.FromTurn is { } from && index < from)
+            {
+                return;
+            }
+
+            if (truncated || (options.ToTurn is { } to && index > to)
+                || (options.MaxCharacters > 0 && characters + (long)text.Length > options.MaxCharacters && turns.Count > 0))
+            {
+                nextTurn ??= index;
+                truncated = true;
+                return;
+            }
+
+            characters += text.Length;
+            turns.Add(new Turn { Index = index, Role = role, Timestamp = timestamp, Model = model, Agent = agent, Blocks = [new TextBlock(text)] });
+        }
     }
 
     /// <summary>

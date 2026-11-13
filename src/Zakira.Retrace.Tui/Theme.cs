@@ -171,6 +171,30 @@ internal static class Theme
 
     public static Style PatchMarker { get; } = Style.Fg(Purple);
 
+    public static Style MarkdownHeading { get; } = Style.Fg(Cyan).Bold();
+
+    public static Style InlineCode { get; } = new(Cyan, Surface);
+
+    public static Style Link { get; } = Style.Fg(Accent).With(TermAttr.Underline);
+
+    public static Style Quote { get; } = Style.Fg(TextSecondary).Italic();
+
+    public static Style CodeLabel { get; } = Style.Fg(Muted);
+
+    public static Style Code { get; } = Style.Fg(TextSecondary);
+
+    public static Style CodeKeyword { get; } = Style.Fg(Purple).Bold();
+
+    public static Style CodeString { get; } = Style.Fg(Green);
+
+    public static Style CodeNumber { get; } = Style.Fg(Orange);
+
+    public static Style CodeComment { get; } = Style.Fg(Muted).Italic();
+
+    public static Style DiffAdded { get; } = Style.Fg(Green);
+
+    public static Style DiffRemoved { get; } = Style.Fg(Red);
+
     public static Color RoleColor(Abstractions.TurnRole role) => role switch
     {
         Abstractions.TurnRole.User => Green,

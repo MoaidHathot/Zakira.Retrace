@@ -51,7 +51,7 @@ public sealed record BrowserOptions
     /// <summary>Query to start with, as if typed.</summary>
     public string? InitialQuery { get; init; }
 
-    /// <summary>Filter applied to every list and search, from the CLI's shared filter flags.</summary>
+    /// <summary>Initial filter state from the CLI's shared flags; editable and resettable in the browser.</summary>
     public SessionFilter Filter { get; init; } = SessionFilter.All;
 
     /// <summary>Picker mode. <see cref="PickKind.None"/> means a normal browse.</summary>
@@ -72,11 +72,17 @@ public sealed record BrowserOptions
     /// <summary>Show reasoning in the reader initially.</summary>
     public bool ShowReasoning { get; init; }
 
+    /// <summary>Render Markdown and code styling in the preview and reader. Toggle with v.</summary>
+    public bool RichPreview { get; init; } = true;
+
     /// <summary>Sessions fetched when browsing without a query.</summary>
     public int ListLimit { get; init; } = 200;
 
     /// <summary>Results fetched per search.</summary>
     public int SearchLimit { get; init; } = 50;
+
+    /// <summary>Idle time before a typed query runs, in milliseconds (0–1000).</summary>
+    public int SearchDebounceMilliseconds { get; init; } = 120;
 
     /// <summary>Use relative dates ("3d ago") in the list.</summary>
     public bool RelativeDates { get; init; } = true;

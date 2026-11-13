@@ -116,21 +116,11 @@ internal static class VsCodeTranscriptBuilder
         var characters = 0;
         var truncated = false;
         int? nextTurn = null;
+        var totalTurns = 0;
+        var contentOptions = options with { IncludeReasoning = true };
 
         for (var index = 0; index < requests.Count; index++)
         {
-            if (options.FromTurn is { } from && index < from)
-            {
-                continue;
-            }
-
-            if (options.ToTurn is { } to && index > to)
-            {
-                nextTurn ??= index;
-                truncated = true;
-                break;
-            }
-
             if (requests[index] is not JsonObject request)
             {
                 continue;
@@ -139,60 +129,75 @@ internal static class VsCodeTranscriptBuilder
             var timestamp = ReadEpoch(request["timestamp"]);
             var model = NormalizeModelId(request["modelId"]?.ToString());
             var agent = NormalizeAgentId((request["agent"] as JsonObject)?["id"]?.ToString());
+            var requestStart = totalTurns;
 
             var prompt = ReadPromptText(request);
             if (!string.IsNullOrWhiteSpace(prompt))
             {
-                turns.Add(new Turn
+                AddTurn(new Turn
                 {
-                    Index = turns.Count,
+                    Index = totalTurns,
                     Role = TurnRole.User,
                     Timestamp = timestamp,
                     Blocks = [new TextBlock(prompt)]
                 });
 
-                characters += prompt.Length;
             }
 
-            var blocks = ReadResponseBlocks(request["response"] as JsonArray, options, files, ref toolCalls);
+            // Count messages before hiding reasoning so page cursors and indexed match positions
+            // do not move when the reader toggles a presentation option.
+            var blocks = ReadResponseBlocks(request["response"] as JsonArray, contentOptions, files, ref toolCalls);
             if (blocks.Count > 0)
             {
-                turns.Add(new Turn
+                AddTurn(new Turn
                 {
-                    Index = turns.Count,
+                    Index = totalTurns,
                     Role = TurnRole.Assistant,
                     Timestamp = timestamp,
                     Model = model,
                     Agent = agent,
-                    Blocks = blocks
+                    Blocks = options.IncludeReasoning ? blocks : [.. blocks.Where(block => block is not ReasoningBlock)]
                 });
 
-                characters += blocks.Sum(EstimateSize);
             }
 
-            CollectReferences(request["contentReferences"] as JsonArray, index, files, references);
-
-            if (options.MaxCharacters > 0 && characters > options.MaxCharacters && index < requests.Count - 1)
-            {
-                nextTurn = index + 1;
-                truncated = true;
-                break;
-            }
+            CollectReferences(request["contentReferences"] as JsonArray, requestStart, files, references);
         }
 
         return new SessionTranscript
         {
             Summary = summary with
             {
-                Stats = summary.Stats with { ToolCallCount = toolCalls }
+                Stats = summary.Stats with { ToolCallCount = toolCalls, MessageCount = totalTurns }
             },
             Turns = turns,
             Files = [.. files.Values.OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase)],
             References = references,
-            TotalTurns = requests.Count,
+            TotalTurns = totalTurns,
             NextTurnIndex = nextTurn,
             IsTruncated = truncated
         };
+
+        void AddTurn(Turn turn)
+        {
+            totalTurns++;
+            if (options.FromTurn is { } from && turn.Index < from)
+            {
+                return;
+            }
+
+            var size = turn.Blocks.Sum(EstimateSize);
+            if (truncated || (options.ToTurn is { } to && turn.Index > to)
+                || (options.MaxCharacters > 0 && characters + (long)size > options.MaxCharacters && turns.Count > 0))
+            {
+                nextTurn ??= turn.Index;
+                truncated = true;
+                return;
+            }
+
+            characters += size;
+            turns.Add(turn);
+        }
     }
 
     private static List<ContentBlock> ReadResponseBlocks(

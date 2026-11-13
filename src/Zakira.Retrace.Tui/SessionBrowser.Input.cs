@@ -29,7 +29,7 @@ public sealed partial class SessionBrowser
         switch (mode)
         {
             case Mode.Help:
-                mode = Mode.List;
+                HandleHelpKey(key);
                 return;
 
             case Mode.Info:
@@ -48,9 +48,19 @@ public sealed partial class SessionBrowser
                 HandleInputKey(key);
                 return;
 
+            case Mode.Filters:
+                HandleFilterKey(key);
+                return;
+
             case Mode.Reader:
                 HandleReaderKey(key);
                 return;
+        }
+
+        if (key.Kind == KeyKind.Function && key.Number is 2 or 3)
+        {
+            OpenFilters(providers: key.Number == 2);
+            return;
         }
 
         if (key.IsMouse)
@@ -87,11 +97,7 @@ public sealed partial class SessionBrowser
             case KeyKind.Enter:
                 searchFocused = false;
                 focus = Pane.List;
-                if (rows.Count > 0)
-                {
-                    OpenSelected();
-                }
-
+                OpenSelected();
                 return;
 
             case KeyKind.Up:
@@ -154,7 +160,7 @@ public sealed partial class SessionBrowser
                 return;
 
             case KeyKind.Function when key.Number == 1:
-                mode = Mode.Help;
+                OpenHelp();
                 return;
 
             case KeyKind.Function when key.Number == 5:
@@ -312,7 +318,7 @@ public sealed partial class SessionBrowser
                 return;
 
             case KeyKind.Function when key.Number == 1:
-                mode = Mode.Help;
+                OpenHelp();
                 return;
 
             case KeyKind.Function when key.Number == 5:
@@ -366,6 +372,12 @@ public sealed partial class SessionBrowser
             return;
         }
 
+        if (appliedQueryRevision != queryRevision && "irRcyYdoet".Contains(key.Character))
+        {
+            SetStatus("results are updating; wait for the current selection");
+            return;
+        }
+
         switch (key.Character)
         {
             case '/':
@@ -406,7 +418,7 @@ public sealed partial class SessionBrowser
                 break;
 
             case '?':
-                mode = Mode.Help;
+                OpenHelp();
                 break;
 
             case 'i':
@@ -457,6 +469,26 @@ public sealed partial class SessionBrowser
                 CycleSourceFilter();
                 break;
 
+            case 'p':
+                OpenFilters(providers: true);
+                break;
+
+            case 'f':
+                OpenFilters(providers: false);
+                break;
+
+            case 'O':
+                CycleSort();
+                break;
+
+            case 'b':
+                CycleGrouping();
+                break;
+
+            case '0':
+                ResetFilters();
+                break;
+
             case 'w':
                 here = !here;
                 ScheduleQuery(immediate: true);
@@ -481,6 +513,10 @@ public sealed partial class SessionBrowser
                 showReasoning = !showReasoning;
                 InvalidateTranscript();
                 SetStatus(showReasoning ? "reasoning shown" : "reasoning hidden");
+                break;
+
+            case 'v':
+                ToggleRichPreview();
                 break;
         }
     }
@@ -510,7 +546,7 @@ public sealed partial class SessionBrowser
                 return true;
 
             case KeyKind.End:
-                previewScroll = int.MaxValue / 2;
+                ScrollPreview(int.MaxValue / 4);
                 return true;
 
             case KeyKind.Left:
@@ -554,7 +590,7 @@ public sealed partial class SessionBrowser
                 return true;
 
             case 'G':
-                previewScroll = int.MaxValue / 2;
+                ScrollPreview(int.MaxValue / 4);
                 return true;
 
             case 'h':
@@ -571,6 +607,12 @@ public sealed partial class SessionBrowser
 
         if (key.Kind == KeyKind.MouseClick)
         {
+            if (layout.Filters.Contains(key.Row, key.Column))
+            {
+                OpenFilters(providers: key.Row == layout.Filters.Top);
+                return;
+            }
+
             if (layout.Search.Contains(key.Row, key.Column))
             {
                 searchFocused = true;
@@ -585,8 +627,8 @@ public sealed partial class SessionBrowser
                 var inner = layout.List.Inset();
                 if (inner.Contains(key.Row, key.Column))
                 {
-                    var index = listScroll + (key.Row - inner.Top) / 2;
-                    if (index < rows.Count)
+                    var line = listScroll + key.Row - inner.Top;
+                    if (line < listLines.Count && listLines[line].RowIndex is var index && index >= 0)
                     {
                         if (index == selected)
                         {
@@ -655,12 +697,43 @@ public sealed partial class SessionBrowser
 
     private void ScrollPreview(int delta)
     {
-        previewScroll = Math.Max(0, previewScroll + delta);
+        var row = Selected;
+        if (row is null)
+        {
+            return;
+        }
+
+        var layout = ComputeLayout();
+        if (!layout.ShowPreview)
+        {
+            return;
+        }
+
+        var inner = layout.Preview.Inset();
+        var total = BuildPreviewLines(row, Math.Max(1, inner.Width - 3)).Count;
+        var max = Math.Max(0, total - inner.Height);
+        previewScroll = (int)Math.Clamp((long)previewScroll + delta, 0, max);
+        if (delta > 0 && previewScroll >= max)
+        {
+            LoadMoreTurns();
+        }
+
         dirty = true;
     }
 
     private void OpenSelected()
     {
+        if (appliedQueryRevision != queryRevision || queryLoading)
+        {
+            openWhenReady = true;
+            if (!queryInFlight || executingQueryRevision != queryRevision)
+            {
+                queryDueAt = clock.ElapsedMilliseconds;
+            }
+            SetStatus("waiting for current results", StatusKind.Busy);
+            return;
+        }
+
         if (Selected is null)
         {
             return;
@@ -730,7 +803,7 @@ public sealed partial class SessionBrowser
                 return;
 
             case KeyKind.Function when key.Number == 1:
-                mode = Mode.Help;
+                OpenHelp();
                 return;
         }
 
@@ -828,8 +901,12 @@ public sealed partial class SessionBrowser
                 SetStatus(showReasoning ? "reasoning shown" : "reasoning hidden");
                 break;
 
+            case 'v':
+                ToggleRichPreview();
+                break;
+
             case '?':
-                mode = Mode.Help;
+                OpenHelp();
                 break;
 
             case 'i':
@@ -978,6 +1055,46 @@ public sealed partial class SessionBrowser
 
     // ---- overlays ----------------------------------------------------------------------------
 
+    private void OpenHelp()
+    {
+        openWhenReady = false;
+        helpReturnMode = mode;
+        helpScroll = 0;
+        mode = Mode.Help;
+    }
+
+    private void HandleHelpKey(KeyEvent key)
+    {
+        if (key.Kind is KeyKind.Escape or KeyKind.Enter || key.Is('q') || key.Is('?'))
+        {
+            mode = helpReturnMode;
+        }
+        else if (key.Kind is KeyKind.Down or KeyKind.MouseScrollDown || key.Is('j'))
+        {
+            helpScroll++;
+        }
+        else if (key.Kind is KeyKind.Up or KeyKind.MouseScrollUp || key.Is('k'))
+        {
+            helpScroll = Math.Max(0, helpScroll - 1);
+        }
+        else if (key.Kind == KeyKind.PageDown || key.Is(' '))
+        {
+            helpScroll += Math.Max(1, buffer.Height - 8);
+        }
+        else if (key.Kind == KeyKind.PageUp)
+        {
+            helpScroll = Math.Max(0, helpScroll - Math.Max(1, buffer.Height - 8));
+        }
+        else if (key.Kind == KeyKind.Home || key.Is('g'))
+        {
+            helpScroll = 0;
+        }
+        else if (key.Kind == KeyKind.End || key.Is('G'))
+        {
+            helpScroll = int.MaxValue;
+        }
+    }
+
     private void HandleConfirmKey(KeyEvent key)
     {
         if (confirm is null)
@@ -1057,26 +1174,11 @@ public sealed partial class SessionBrowser
 
     // ---- filters -----------------------------------------------------------------------------
 
-    private void CycleSourceFilter()
+    private void ToggleRichPreview()
     {
-        var sources = backend.SourceIds;
-        if (sources.Count == 0)
-        {
-            return;
-        }
-
-        if (sourceFilter is null)
-        {
-            sourceFilter = sources[0];
-        }
-        else
-        {
-            var index = sources.ToList().FindIndex(id => id.Equals(sourceFilter, StringComparison.OrdinalIgnoreCase));
-            sourceFilter = index < 0 || index + 1 >= sources.Count ? null : sources[index + 1];
-        }
-
-        SetStatus(sourceFilter is null ? "all sources" : $"source: {sourceFilter}");
-        ScheduleQuery(immediate: true);
+        richPreview = !richPreview;
+        formattedWidth = -1;
+        SetStatus(richPreview ? "rich Markdown preview" : "literal text preview");
     }
 
     private void CycleSearchMode()

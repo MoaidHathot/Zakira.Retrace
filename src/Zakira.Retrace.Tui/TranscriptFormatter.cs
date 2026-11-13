@@ -18,12 +18,14 @@ public sealed record TranscriptLine(IReadOnlyList<StyledSpan> Spans, int TurnInd
 /// <param name="ShowReasoning">Include reasoning blocks.</param>
 /// <param name="HighlightTerms">Search terms to highlight, case-insensitively.</param>
 /// <param name="MaxToolOutputCharacters">Truncate each tool output to this many characters; 0 means unbounded.</param>
+/// <param name="RichText">Render Markdown, code syntax accents and diffs. False keeps literal prose.</param>
 public sealed record TranscriptFormatOptions(
     int Width,
     bool ShowToolOutput,
     bool ShowReasoning,
     IReadOnlyList<string> HighlightTerms,
-    int MaxToolOutputCharacters = 4000);
+    int MaxToolOutputCharacters = 4000,
+    bool RichText = true);
 
 /// <summary>
 /// Lays a transcript out as terminal lines.
@@ -42,7 +44,7 @@ public static class TranscriptFormatter
     public static IReadOnlyList<TranscriptLine> Format(SessionTranscript transcript, TranscriptFormatOptions options)
     {
         var lines = new List<TranscriptLine>();
-        var width = Math.Max(10, options.Width);
+        var width = Math.Max(1, options.Width);
         var summary = transcript.Summary;
 
         lines.Add(Header(summary.Title, Theme.Heading, width));
@@ -81,6 +83,7 @@ public static class TranscriptFormatter
         }
 
         Fact("created", summary.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        Fact("updated", summary.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
 
         if (summary.Stats.MessageCount is { } messages and > 0)
         {
@@ -106,11 +109,10 @@ public static class TranscriptFormatter
 
         if (transcript.IsTruncated)
         {
-            lines.Add(new TranscriptLine(
-                [new StyledSpan($"\u2026 {transcript.TotalTurns - (transcript.NextTurnIndex ?? 0):N0} more turn(s). Scroll down to load them.", Theme.Warn)],
-                transcript.Turns.Count > 0 ? transcript.Turns[^1].Index : -1,
-                false,
-                false));
+            foreach (var wrapped in WrapSpans([new StyledSpan($"\u2026 {Math.Max(0, transcript.TotalTurns - (transcript.NextTurnIndex ?? 0)):N0} more turn(s). Scroll down to load them.", Theme.Warn)], width))
+            {
+                lines.Add(new TranscriptLine(wrapped, transcript.Turns.Count > 0 ? transcript.Turns[^1].Index : -1, false, false));
+            }
         }
 
         return lines;
@@ -150,6 +152,11 @@ public static class TranscriptFormatter
 
             foreach (var term in terms)
             {
+                if (term.Length == 0)
+                {
+                    continue;
+                }
+
                 var index = text.IndexOf(term, position, StringComparison.OrdinalIgnoreCase);
                 if (index >= 0 && (bestIndex < 0 || index < bestIndex || (index == bestIndex && term.Length > bestLength)))
                 {
@@ -179,50 +186,7 @@ public static class TranscriptFormatter
 
     /// <summary>Word-wraps a run of spans to a width, keeping each word's style.</summary>
     public static IEnumerable<IReadOnlyList<StyledSpan>> WrapSpans(IReadOnlyList<StyledSpan> spans, int width)
-    {
-        var line = new List<StyledSpan>();
-        var used = 0;
-
-        foreach (var span in spans)
-        {
-            var words = span.Text.Split(' ');
-            for (var index = 0; index < words.Length; index++)
-            {
-                var word = words[index] + (index < words.Length - 1 ? " " : string.Empty);
-                var wordWidth = TextWidth.Of(word);
-                if (wordWidth == 0)
-                {
-                    continue;
-                }
-
-                if (used > 0 && used + TextWidth.Of(word.TrimEnd()) > width)
-                {
-                    yield return TrimEnd(line);
-                    line = [];
-                    used = 0;
-                }
-
-                line.Add(new StyledSpan(word, span.Style));
-                used += wordWidth;
-            }
-        }
-
-        if (line.Count > 0)
-        {
-            yield return TrimEnd(line);
-        }
-    }
-
-    private static List<StyledSpan> TrimEnd(List<StyledSpan> line)
-    {
-        if (line.Count > 0)
-        {
-            var last = line[^1];
-            line[^1] = last with { Text = last.Text.TrimEnd() };
-        }
-
-        return line;
-    }
+        => StyledText.Wrap(spans, width);
 
     private static void AppendTurn(List<TranscriptLine> lines, Turn turn, TranscriptFormatOptions options, int width)
     {
@@ -248,7 +212,12 @@ public static class TranscriptFormatter
 
         head.Add(new StyledSpan($"  #{turn.Index}", Style.Fg(Theme.Faint)));
 
-        lines.Add(new TranscriptLine(head, turn.Index, true, false));
+        var firstHeaderLine = true;
+        foreach (var wrapped in WrapSpans(head, width))
+        {
+            lines.Add(new TranscriptLine(wrapped, turn.Index, firstHeaderLine, false));
+            firstHeaderLine = false;
+        }
 
         var wroteAnything = false;
 
@@ -257,7 +226,15 @@ public static class TranscriptFormatter
             switch (block)
             {
                 case TextBlock text when !string.IsNullOrWhiteSpace(text.Text):
-                    AppendParagraphs(lines, text.Text, Theme.Body, turn.Index, options, width, ruleStyle);
+                    if (options.RichText)
+                    {
+                        AppendRich(lines, MarkdownFormatter.Format(text.Text, Math.Max(1, width - Rule.Length), Theme.Body, options.HighlightTerms), turn.Index, ruleStyle, width);
+                    }
+                    else
+                    {
+                        AppendParagraphs(lines, text.Text, Theme.Body, turn.Index, options, width, ruleStyle, preserveLines: true);
+                    }
+
                     wroteAnything = true;
                     break;
 
@@ -279,7 +256,12 @@ public static class TranscriptFormatter
                         spans.Add(new StyledSpan(status, Theme.TranscriptMeta));
                     }
 
-                    lines.Add(new TranscriptLine(spans, turn.Index, false, matched));
+                    AppendWrapped(lines, spans, turn.Index, matched, width);
+
+                    if (options.ShowToolOutput && !string.IsNullOrWhiteSpace(tool.InputJson))
+                    {
+                        AppendCode(lines, tool.InputJson, "json", turn.Index, options, width, ruleStyle);
+                    }
 
                     if (options.ShowToolOutput && !string.IsNullOrWhiteSpace(tool.Output))
                     {
@@ -287,7 +269,7 @@ public static class TranscriptFormatter
                             ? tool.Output[..options.MaxToolOutputCharacters] + $"\n\u2026 [{tool.Output.Length - options.MaxToolOutputCharacters:N0} more characters]"
                             : tool.Output;
 
-                        AppendParagraphs(lines, output, Theme.ToolOutput, turn.Index, options, width, ruleStyle, indent: 4, preserveLines: true);
+                        AppendCode(lines, output, string.Empty, turn.Index, options, width, ruleStyle);
                     }
 
                     wroteAnything = true;
@@ -305,7 +287,12 @@ public static class TranscriptFormatter
                         spans.Add(new StyledSpan(counts, Theme.TranscriptMeta));
                     }
 
-                    lines.Add(new TranscriptLine(spans, turn.Index, false, matched));
+                    AppendWrapped(lines, spans, turn.Index, matched, width);
+                    if (options.ShowToolOutput && !string.IsNullOrWhiteSpace(patch.Diff))
+                    {
+                        AppendCode(lines, patch.Diff, "diff", turn.Index, options, width, ruleStyle);
+                    }
+
                     wroteAnything = true;
                     break;
                 }
@@ -332,11 +319,11 @@ public static class TranscriptFormatter
         bool preserveLines = false)
     {
         var prefix = indent > 0 ? new string(' ', indent) : string.Empty;
-        var inner = Math.Max(4, width - Rule.Length - indent);
+        var inner = Math.Max(1, width - Rule.Length - indent);
 
-        foreach (var rawLine in text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        foreach (var rawLine in MarkdownFormatter.Clean(text).Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
         {
-            var source = preserveLines ? rawLine.TrimEnd().Replace('\t', ' ') : TextUtilities.Flatten(rawLine);
+            var source = preserveLines ? MarkdownFormatter.ExpandTabs(rawLine.TrimEnd()) : TextUtilities.Flatten(rawLine);
 
             if (source.Length == 0)
             {
@@ -344,7 +331,10 @@ public static class TranscriptFormatter
                 continue;
             }
 
-            foreach (var wrapped in TextWidth.Wrap(source, inner))
+            var wrappedLines = preserveLines
+                ? StyledText.Wrap([new StyledSpan(source, style)], inner, wordWrap: false).Select(line => string.Concat(line.Select(span => span.Text)))
+                : TextWidth.Wrap(source, inner);
+            foreach (var wrapped in wrappedLines)
             {
                 var (spans, matched) = Highlight(wrapped, style, options.HighlightTerms);
                 var withPrefix = new List<StyledSpan>(spans.Count + 2) { new(Rule, ruleStyle) };
@@ -356,6 +346,37 @@ public static class TranscriptFormatter
                 withPrefix.AddRange(spans);
                 lines.Add(new TranscriptLine(withPrefix, turnIndex, false, matched));
             }
+        }
+    }
+
+    private static void AppendRich(List<TranscriptLine> lines, IEnumerable<IReadOnlyList<StyledSpan>> content, int turnIndex, Style ruleStyle, int width)
+    {
+        foreach (var spans in content)
+        {
+            var prefix = width > Rule.Length ? Rule : string.Empty;
+            var matched = spans.Any(span => span.Style.Background == Theme.Match.Background);
+            lines.Add(new TranscriptLine([new StyledSpan(prefix, ruleStyle), .. spans], turnIndex, false, matched));
+        }
+    }
+
+    private static void AppendWrapped(List<TranscriptLine> lines, IReadOnlyList<StyledSpan> spans, int turnIndex, bool matched, int width)
+    {
+        foreach (var wrapped in WrapSpans(spans, width))
+        {
+            lines.Add(new TranscriptLine(wrapped, turnIndex, false, matched && wrapped.Any(span => span.Style.Background == Theme.Match.Background)));
+        }
+    }
+
+    private static void AppendCode(List<TranscriptLine> lines, string text, string language, int turnIndex, TranscriptFormatOptions options, int width, Style ruleStyle)
+    {
+        if (options.MaxToolOutputCharacters > 0 && text.Length > options.MaxToolOutputCharacters)
+        {
+            text = text[..options.MaxToolOutputCharacters] + "\n… (output truncated)";
+        }
+
+        foreach (var line in MarkdownFormatter.Clean(text).Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            AppendRich(lines, MarkdownFormatter.CodeLine(line, options.RichText ? language : string.Empty, Math.Max(1, width - Rule.Length), options.HighlightTerms), turnIndex, ruleStyle, width);
         }
     }
 

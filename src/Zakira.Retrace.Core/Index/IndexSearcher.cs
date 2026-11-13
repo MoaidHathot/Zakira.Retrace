@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Zakira.Retrace.Abstractions;
 using Zakira.Retrace.Core.Configuration;
@@ -49,12 +50,27 @@ public sealed class IndexSearcher(
     public async Task<IReadOnlyList<SessionSummary>> ListAsync(SessionFilter filter, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        connection.EnableQueryCancellation(cancellationToken);
+        try
+        {
+            return await ListCoreAsync(connection, filter, cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Listing cancelled.", ex, cancellationToken);
+        }
+    }
 
+    private async Task<IReadOnlyList<SessionSummary>> ListCoreAsync(SqliteConnection connection, SessionFilter filter, CancellationToken cancellationToken)
+    {
         var (where, parameters) = BuildFilterSql(filter, alias: "s");
         var order = filter.Sort switch
         {
             SessionSortOrder.Created => "s.created_utc DESC",
             SessionSortOrder.Size => "COALESCE(s.message_count, 0) DESC",
+            SessionSortOrder.Oldest => "s.updated_utc ASC",
+            SessionSortOrder.Provider => "s.source_id COLLATE NOCASE, s.updated_utc DESC",
+            SessionSortOrder.Title => "s.title COLLATE NOCASE",
             _ => "s.updated_utc DESC"
         };
 
@@ -62,7 +78,7 @@ public sealed class IndexSearcher(
             SELECT {SessionProjection}
             FROM session s
             {where}
-            ORDER BY {order}
+            ORDER BY {order}, s.uri
             {(filter.Limit > 0 ? $"LIMIT {filter.Limit}" : string.Empty)};
             """;
 
@@ -94,20 +110,32 @@ public sealed class IndexSearcher(
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-
-        var candidateSessions = await ReadCandidateSessionRowIdsAsync(connection, query.Filter, cancellationToken).ConfigureAwait(false);
-        if (candidateSessions.Count == 0)
+        connection.EnableQueryCancellation(cancellationToken);
+        try
         {
-            return [];
+            return await SearchCoreAsync(connection, query, cancellationToken).ConfigureAwait(false);
         }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Search cancelled.", ex, cancellationToken);
+        }
+    }
 
+    private async Task<IReadOnlyList<SearchHit>> SearchCoreAsync(SqliteConnection connection, SearchQuery query, CancellationToken cancellationToken)
+    {
         var mode = ResolveMode(query.Mode);
 
         var lexical = mode is SearchMode.Hybrid or SearchMode.Lexical
-            ? await SearchLexicalAsync(connection, query, candidateSessions, cancellationToken).ConfigureAwait(false)
+            ? await SearchLexicalAsync(connection, query, cancellationToken).ConfigureAwait(false)
             : [];
 
+        // Keyword-only queries need no full scan of session ids. Their metadata predicate is part
+        // of the FTS statement, before LIMIT, so another provider cannot exhaust the candidate cap.
+        var candidateSessions = mode is SearchMode.Hybrid or SearchMode.Semantic
+            ? await ReadCandidateSessionRowIdsAsync(connection, query.Filter, cancellationToken).ConfigureAwait(false)
+            : [];
         var semantic = mode is SearchMode.Hybrid or SearchMode.Semantic
+            && candidateSessions.Count > 0
             ? await SearchSemanticAsync(connection, query, candidateSessions, cancellationToken).ConfigureAwait(false)
             : [];
 
@@ -123,14 +151,6 @@ public sealed class IndexSearcher(
             .ToArray();
 
         var sessions = await ReadSessionsAsync(connection, top.Select(entry => entry.Key).ToArray(), cancellationToken).ConfigureAwait(false);
-
-        // Snippets are fetched for every surviving hit in one statement. Asking FTS5 once per hit
-        // meant fifty small queries per search, which together cost more than the search itself.
-        var snippetsBySession = await ReadSnippetsAsync(
-            connection,
-            top.Where(entry => sessions.ContainsKey(entry.Key)).Select(entry => (entry.Key, entry.Value.ChunkRowIds)).ToArray(),
-            query,
-            cancellationToken).ConfigureAwait(false);
 
         var hits = new List<SearchHit>(top.Length);
         var now = DateTimeOffset.UtcNow;
@@ -150,12 +170,18 @@ public sealed class IndexSearcher(
                 Session = session,
                 Score = score,
                 LexicalScore = scores.Lexical,
-                SemanticScore = scores.Semantic,
-                Snippets = snippetsBySession.TryGetValue(sessionRowId, out var snippets) ? snippets : []
+                SemanticScore = scores.Semantic
             });
         }
 
-        return [.. hits.OrderByDescending(hit => hit.Score).Take(Math.Max(query.Top, 1))];
+        var chosen = hits.OrderByDescending(hit => hit.Score).ThenBy(hit => hit.Session.Ref.Uri, StringComparer.Ordinal).Take(Math.Max(query.Top, 1)).ToArray();
+        var rowIds = sessions.ToDictionary(entry => entry.Value.Ref, entry => entry.Key);
+        // Boost and limit before fetching excerpts: half the previously fetched snippets could
+        // never reach the screen. A batched left join preserves semantic-only passages as well.
+        var snippetsBySession = await ReadSnippetsAsync(connection,
+            chosen.Select(hit => (rowIds[hit.Session.Ref], fused[rowIds[hit.Session.Ref]].ChunkRowIds)).ToArray(),
+            query, cancellationToken).ConfigureAwait(false);
+        return [.. chosen.Select(hit => hit with { Snippets = snippetsBySession.GetValueOrDefault(rowIds[hit.Session.Ref]) ?? [] })];
     }
 
     /// <summary>Reads the files a session touched.</summary>
@@ -204,7 +230,9 @@ public sealed class IndexSearcher(
     }
 
     /// <summary>Reports index size, freshness, and per-source state.</summary>
-    public async Task<IndexStatus> GetStatusAsync(CancellationToken cancellationToken)
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <param name="includeVectorCoverage">False omits vector counts and coverage scans, for interactive headers and freshness checks.</param>
+    public async Task<IndexStatus> GetStatusAsync(CancellationToken cancellationToken, bool includeVectorCoverage = true)
     {
         if (!Exists)
         {
@@ -229,6 +257,20 @@ public sealed class IndexSearcher(
                     ChunkCount = (int)reader.GetInt64(4)
                 });
             }
+        }
+
+        if (!includeVectorCoverage)
+        {
+            var refreshed = await RetraceIndexSchema.GetMetaAsync(connection, RetraceIndexSchema.LastRefreshKey, cancellationToken).ConfigureAwait(false);
+            return new IndexStatus
+            {
+                Path = IndexPath,
+                Exists = true,
+                SizeBytes = new FileInfo(IndexPath).Length,
+                Sources = sources,
+                EmbeddingModel = await RetraceIndexSchema.GetMetaAsync(connection, RetraceIndexSchema.EmbeddingModelKey, cancellationToken).ConfigureAwait(false),
+                LastRefresh = long.TryParse(refreshed, out var timestamp) ? DateTimeOffset.FromUnixTimeMilliseconds(timestamp) : null
+            };
         }
 
         // Sessions carrying a vector, and sessions that could carry one, per source. Derived live
@@ -288,7 +330,7 @@ public sealed class IndexSearcher(
         // Hybrid silently degrades to lexical when no model is installed. Failing instead would be
         // hostile: keyword search is fully functional on its own and is the sensible default when
         // the optional model has not been downloaded.
-        if (requested == SearchMode.Hybrid && (!config.Embeddings.Enabled || !embeddingFactory.IsAvailable))
+        if (!config.Embeddings.Enabled || (requested == SearchMode.Hybrid && !embeddingFactory.IsAvailable))
         {
             return SearchMode.Lexical;
         }
@@ -299,20 +341,28 @@ public sealed class IndexSearcher(
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
         var connection = await RetraceIndexSchema.OpenForReadAsync(IndexPath, cancellationToken).ConfigureAwait(false);
-        return connection ?? throw new IndexNotBuiltException(IndexPath);
-    }
-
-    private static async Task<SessionSummary?> ResolveCoreAsync(SqliteConnection connection, string identifier, CancellationToken cancellationToken)
-    {
-        // Exact URI, then exact native id, then unique prefix. Prefix resolution comes last so an
-        // id that is also a valid prefix of another never becomes ambiguous.
-        var exact = await QueryOneAsync(connection, $"SELECT {SessionProjection} FROM session s WHERE s.uri = $value LIMIT 2;", identifier, cancellationToken).ConfigureAwait(false);
-        if (exact.Count == 1)
+        if (connection is null)
         {
-            return exact[0];
+            throw new IndexNotBuiltException(IndexPath);
         }
 
-        exact = await QueryOneAsync(connection, $"SELECT {SessionProjection} FROM session s WHERE s.native_id = $value LIMIT 2;", identifier, cancellationToken).ConfigureAwait(false);
+        return connection;
+    }
+
+    private async Task<SessionSummary?> ResolveCoreAsync(SqliteConnection connection, string identifier, CancellationToken cancellationToken)
+    {
+        var referenceText = identifier.StartsWith("retrace://", StringComparison.OrdinalIgnoreCase)
+            ? identifier
+            : "retrace://" + identifier;
+        var scoped = SessionRef.TryParse(referenceText, out var reference);
+        var value = scoped ? reference!.NativeId : identifier;
+        var filter = SessionFilter.All with { IncludeArchived = true, SourceIds = scoped ? [reference!.SourceId] : [] };
+        var (where, parameters) = BuildFilterSql(filter, "s");
+        var conjunction = where.Length == 0 ? "WHERE" : where + " AND";
+
+        // Scope both exact and prefix resolution before limiting: a disabled provider must not
+        // leak through an old index or make an enabled provider's native id appear ambiguous.
+        var exact = await QueryOneAsync(connection, $"SELECT {SessionProjection} FROM session s {conjunction} s.native_id = $value LIMIT 2;", value, parameters, cancellationToken).ConfigureAwait(false);
         if (exact.Count == 1)
         {
             return exact[0];
@@ -323,18 +373,16 @@ public sealed class IndexSearcher(
             throw new SessionNotFoundException(identifier, [.. exact.Select(session => session.Ref.Uri)]);
         }
 
-        // Accept "source/id-prefix" as well as a bare prefix.
-        var separator = identifier.LastIndexOf('/');
-        var prefix = separator >= 0 ? identifier[(separator + 1)..] : identifier;
-        if (prefix.Length < 4)
+        if (value.Length < 4)
         {
             return null;
         }
 
         var matches = await QueryOneAsync(
             connection,
-            $"SELECT {SessionProjection} FROM session s WHERE s.native_id LIKE $value || '%' LIMIT 6;",
-            prefix,
+            $"SELECT {SessionProjection} FROM session s {conjunction} substr(s.native_id, 1, length($value)) = $value COLLATE NOCASE LIMIT 6;",
+            value,
+            parameters,
             cancellationToken).ConfigureAwait(false);
 
         return matches.Count switch
@@ -345,12 +393,16 @@ public sealed class IndexSearcher(
         };
     }
 
-    private static async Task<List<SessionSummary>> QueryOneAsync(SqliteConnection connection, string sql, string value, CancellationToken cancellationToken)
+    private static async Task<List<SessionSummary>> QueryOneAsync(SqliteConnection connection, string sql, string value, IReadOnlyList<(string Name, object Value)> parameters, CancellationToken cancellationToken)
     {
         var results = new List<SessionSummary>();
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$value", value);
+        foreach (var (name, parameter) in parameters)
+        {
+            command.Parameters.AddWithValue(name, parameter);
+        }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -361,7 +413,7 @@ public sealed class IndexSearcher(
         return results;
     }
 
-    private static async Task<HashSet<long>> ReadCandidateSessionRowIdsAsync(SqliteConnection connection, SessionFilter filter, CancellationToken cancellationToken)
+    private async Task<HashSet<long>> ReadCandidateSessionRowIdsAsync(SqliteConnection connection, SessionFilter filter, CancellationToken cancellationToken)
     {
         var (where, parameters) = BuildFilterSql(filter, alias: "s");
 
@@ -385,7 +437,6 @@ public sealed class IndexSearcher(
     private async Task<List<RankedChunk>> SearchLexicalAsync(
         SqliteConnection connection,
         SearchQuery query,
-        HashSet<long> candidateSessions,
         CancellationToken cancellationToken)
     {
         var match = Fts5Query.Build(query.Text);
@@ -399,36 +450,29 @@ public sealed class IndexSearcher(
             config.Search.LexicalCandidateCap);
 
         var results = new List<RankedChunk>();
+        var (where, parameters) = BuildFilterSql(query.Filter, "s");
 
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT c.rowid, c.session_rowid, bm25(chunk_fts) AS rank
+        command.CommandText = $"""
+            SELECT c.rowid, c.session_rowid, chunk_fts.rank
             FROM chunk_fts
             JOIN chunk c ON c.rowid = chunk_fts.rowid
-            WHERE chunk_fts MATCH $match
-            ORDER BY rank
+            JOIN session s ON s.rowid = c.session_rowid
+            {(where.Length == 0 ? "WHERE" : where + " AND")} chunk_fts MATCH $match
+            ORDER BY chunk_fts.rank
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$match", match);
         command.Parameters.AddWithValue("$limit", limit);
-
-        try
+        foreach (var (name, value) in parameters)
         {
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var sessionRowId = reader.GetInt64(1);
-                if (candidateSessions.Contains(sessionRowId))
-                {
-                    results.Add(new RankedChunk(reader.GetInt64(0), sessionRowId, -reader.GetDouble(2)));
-                }
-            }
+            command.Parameters.AddWithValue(name, value);
         }
-        catch (SqliteException)
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            // Fts5Query quotes every token, so this should be unreachable; returning nothing rather
-            // than throwing keeps a semantic-only result set usable if it ever is reached.
-            return [];
+            results.Add(new RankedChunk(reader.GetInt64(0), reader.GetInt64(1), -reader.GetDouble(2)));
         }
 
         return results;
@@ -482,6 +526,7 @@ public sealed class IndexSearcher(
 
         for (var index = 0; index < snapshot.RowIds.Length; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var sessionRowId = snapshot.RowIds[index];
             if (!candidateSessions.Contains(sessionRowId))
             {
@@ -635,10 +680,9 @@ public sealed class IndexSearcher(
 
             foreach (var chunk in ranked)
             {
-                rank++;
                 if (!bestRankPerSession.ContainsKey(chunk.SessionRowId))
                 {
-                    bestRankPerSession[chunk.SessionRowId] = rank;
+                    bestRankPerSession[chunk.SessionRowId] = ++rank;
                 }
 
                 if (!fused.TryGetValue(chunk.SessionRowId, out var entry))
@@ -647,7 +691,7 @@ public sealed class IndexSearcher(
                     fused[chunk.SessionRowId] = entry;
                 }
 
-                if (entry.ChunkRowIds.Count < 8)
+                if (entry.ChunkRowIds.Count < 8 && !entry.ChunkRowIds.Contains(chunk.ChunkRowId))
                 {
                     entry.ChunkRowIds.Add(chunk.ChunkRowId);
                 }
@@ -745,13 +789,26 @@ public sealed class IndexSearcher(
             if (match.Length > 0)
             {
                 command.CommandText = $"""
-                    SELECT c.rowid, c.role, c.turn_index, c.timestamp_utc, c.text,
-                           snippet(chunk_fts, 0, '<<', '>>', '…', 20) AS excerpt
+                    WITH excerpts AS MATERIALIZED (
+                        SELECT rowid, snippet(chunk_fts, 0, '<<', '>>', '…', 20) AS excerpt
+                        FROM chunk_fts
+                        WHERE chunk_fts MATCH $match
+                          AND rowid BETWEEN $firstChunk AND $lastChunk
+                          AND +rowid IN ({placeholders})
+                    )
+                    SELECT c.rowid, c.role, c.turn_index, c.timestamp_utc, c.text, e.excerpt
                     FROM chunk c
-                    JOIN chunk_fts ON chunk_fts.rowid = c.rowid AND chunk_fts MATCH $match
+                    LEFT JOIN excerpts e ON e.rowid = c.rowid
                     WHERE c.rowid IN ({placeholders});
                     """;
                 command.Parameters.AddWithValue("$match", match);
+                // FTS5 treats rowid IN as repeated equality scans (plan '=M1'), reopening the
+                // full-text cursor for each excerpt. A range plus non-index-constraining membership
+                // uses one cursor ('M1><'). rowid and the bound values are integers, so unary +
+                // does not change affinity semantics. The synthetic performance test records both
+                // plans and verifies the same excerpts; this avoids ~200 ms for 150 short snippets.
+                command.Parameters.AddWithValue("$firstChunk", batch.Min());
+                command.Parameters.AddWithValue("$lastChunk", batch.Max());
             }
             else
             {
@@ -793,9 +850,10 @@ public sealed class IndexSearcher(
                     }));
                 }
             }
-            catch (SqliteException)
+            catch (SqliteException) when (cancellationToken.IsCancellationRequested)
             {
-                return result;
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
             }
         }
 
@@ -853,7 +911,8 @@ public sealed class IndexSearcher(
                s.workspace_path, s.repository, s.branch, s.agent, s.models,
                s.created_utc, s.updated_utc, s.message_count, s.tool_call_count,
                s.total_tokens, s.cost, s.additions, s.deletions, s.files_changed,
-               s.is_archived, s.parent_native_id, s.content_hash
+               s.is_archived, s.parent_native_id, s.content_hash,
+               (SELECT json_group_array(t.tag) FROM tag t WHERE t.session_uri = s.uri)
         """;
 
     private static SessionSummary MapSession(SqliteDataReader reader, int offset = 0)
@@ -887,19 +946,31 @@ public sealed class IndexSearcher(
             },
             IsArchived = reader.GetInt64(offset + 19) != 0,
             ParentNativeId = reader.GetNullableString(offset + 20),
-            ContentHash = reader.GetString(offset + 21)
+            ContentHash = reader.GetString(offset + 21),
+            Tags = JsonSerializer.Deserialize<string[]>(reader.GetString(offset + 22)) ?? []
         };
     }
 
-    private static (string Where, IReadOnlyList<(string Name, object Value)> Parameters) BuildFilterSql(SessionFilter filter, string alias)
+    private (string Where, IReadOnlyList<(string Name, object Value)> Parameters) BuildFilterSql(SessionFilter filter, string alias)
     {
         var clauses = new List<string>();
         var parameters = new List<(string, object)>();
 
+        var disabled = SourcesConfig.Ids.Where(id => !config.Sources.IsEnabled(id)).ToArray();
+        if (disabled.Length > 0)
+        {
+            var names = disabled.Select((_, index) => $"$disabled{index}");
+            clauses.Add($"{alias}.source_id COLLATE NOCASE NOT IN ({string.Join(",", names)})");
+            for (var index = 0; index < disabled.Length; index++)
+            {
+                parameters.Add(($"$disabled{index}", disabled[index]));
+            }
+        }
+
         if (filter.SourceIds.Count > 0)
         {
             var names = filter.SourceIds.Select((_, index) => $"$source{index}").ToArray();
-            clauses.Add($"{alias}.source_id IN ({string.Join(",", names)})");
+            clauses.Add($"{alias}.source_id COLLATE NOCASE IN ({string.Join(",", names)})");
             for (var index = 0; index < filter.SourceIds.Count; index++)
             {
                 parameters.Add(($"$source{index}", filter.SourceIds[index]));

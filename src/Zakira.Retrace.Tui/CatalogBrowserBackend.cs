@@ -95,7 +95,7 @@ public sealed class CatalogBrowserBackend(
             return new IndexInfo(false, 0, null, false);
         }
 
-        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var status = await searcher.GetStatusAsync(cancellationToken, includeVectorCoverage: false).ConfigureAwait(false);
         return new IndexInfo(true, status.SessionCount, status.EmbeddingModel, config.Embeddings.Enabled && embeddings.IsAvailable);
     }
 }

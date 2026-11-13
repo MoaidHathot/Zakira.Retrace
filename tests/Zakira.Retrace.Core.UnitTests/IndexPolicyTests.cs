@@ -161,6 +161,72 @@ public sealed class IndexPolicyTests
     }
 
     [Fact]
+    public async Task Disabling_a_previously_indexed_provider_hides_it_from_every_indexed_read()
+    {
+        using var temp = new TempDirectory();
+        var config = new RetraceConfig();
+        var (builder, searcher, catalog, _, _) = Create(temp, config);
+        await builder.BuildAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+
+        config.Sources.CopilotCli.Enabled = false;
+        var sessions = await catalog.ListAsync(SessionFilter.All, QueryMode.IndexOnly, TestContext.Current.CancellationToken);
+        sessions.Should().ContainSingle().Which.Ref.SourceId.Should().Be("opencode");
+
+        var hits = await catalog.SearchAsync(new SearchQuery { Text = "hello", Mode = SearchMode.Lexical }, QueryMode.IndexOnly, TestContext.Current.CancellationToken);
+        hits.Should().ContainSingle().Which.Session.Ref.SourceId.Should().Be("opencode");
+
+        var named = await searcher.ListAsync(SessionFilter.All with { SourceIds = ["COPILOT-CLI"] }, TestContext.Current.CancellationToken);
+        named.Should().BeEmpty();
+        foreach (var identifier in new[] { "retrace://copilot-cli/copilot-cli-session", "copilot-cli-session", "copilot-cli/copilot-cli", "copilot-cli" })
+        {
+            (await searcher.ResolveAsync(identifier, TestContext.Current.CancellationToken)).Should().BeNull();
+        }
+
+        await Assert.ThrowsAsync<SessionNotFoundException>(() => catalog.GetTranscriptAsync(
+            "retrace://copilot-cli/copilot-cli-session", TranscriptOptions.Default, TestContext.Current.CancellationToken));
+
+        // Re-enabling works immediately; disabling is a policy change, not a destructive clear.
+        config.Sources.CopilotCli.Enabled = true;
+        (await searcher.ListAsync(SessionFilter.All, TestContext.Current.CancellationToken)).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Per_build_exclusions_override_inclusions_without_changing_configuration()
+    {
+        using var temp = new TempDirectory();
+        var config = new RetraceConfig();
+        var (builder, _, _, opencode, copilot) = Create(temp, config);
+        var result = await builder.BuildAsync(new IndexBuildOptions
+        {
+            SourceIds = ["all"],
+            ExcludedSourceIds = ["COPILOT"]
+        }, TestContext.Current.CancellationToken);
+
+        opencode.GetCalls.Should().Be(1);
+        copilot.ListCalls.Should().Be(0);
+        copilot.GetCalls.Should().Be(0);
+        result.Sources.Single(source => source.SourceId == "copilot-cli").SkipReason.Should().Contain("excluded");
+        config.Sources.CopilotCli.IndexByDefault.Should().BeTrue();
+        config.Sources.CopilotCli.Enabled.Should().BeTrue();
+
+        await builder.BuildAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+        copilot.GetCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Unknown_index_provider_is_rejected_before_touching_sources()
+    {
+        using var temp = new TempDirectory();
+        var (builder, _, _, opencode, copilot) = Create(temp, new RetraceConfig());
+        await Assert.ThrowsAsync<RetraceException>(() => builder.BuildAsync(new IndexBuildOptions
+        {
+            ExcludedSourceIds = ["copliot"]
+        }, TestContext.Current.CancellationToken));
+        opencode.GetCalls.Should().Be(0);
+        copilot.GetCalls.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Automatic_top_up_ignores_a_source_that_is_not_indexed_by_default()
     {
         using var temp = new TempDirectory();

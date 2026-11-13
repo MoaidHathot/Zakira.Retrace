@@ -110,7 +110,7 @@ public sealed class CopilotCliLiveStoreTests
     }
 
     [Fact]
-    public async Task Get_returns_alternating_user_and_assistant_turns()
+    public async Task Get_returns_recorded_turns_with_stable_indices()
     {
         var source = await TryCreateAsync(TestContext.Current.CancellationToken);
         if (source is null)
@@ -136,9 +136,10 @@ public sealed class CopilotCliLiveStoreTests
 
         transcript.Should().NotBeNull();
         transcript!.Turns.Should().NotBeEmpty();
-        transcript.Turns.Should().Contain(turn => turn.Role == TurnRole.User);
-        transcript.Turns.Should().Contain(turn => turn.Role == TurnRole.Assistant);
-        transcript.Turns.Select(turn => turn.Index).Should().BeInAscendingOrder();
+        // A multi-message session may contain only prompts (for example an interrupted run).
+        // The deterministic fixture below covers expansion of actual assistant replies.
+        transcript.Turns.Select(turn => turn.Role).Should().Contain(TurnRole.User);
+        transcript.Turns.Select(turn => turn.Index).Should().BeInAscendingOrder().And.OnlyHaveUniqueItems();
         transcript.Turns.Should().AllSatisfy(turn => turn.PlainText.Should().NotBeNullOrWhiteSpace());
     }
 

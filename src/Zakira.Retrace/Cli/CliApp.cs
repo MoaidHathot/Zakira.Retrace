@@ -187,8 +187,10 @@ public static class CliApp
             PreviewMaxCharacters = config.Tui.PreviewMaxCharacters,
             ShowToolOutput = config.Tui.ShowToolOutput,
             ShowReasoning = config.Tui.ShowReasoning,
+            RichPreview = config.Tui.RichPreview,
             ListLimit = config.Tui.ListLimit,
             SearchLimit = config.Tui.SearchLimit,
+            SearchDebounceMilliseconds = config.Tui.SearchDebounceMilliseconds,
             RelativeDates = config.Output.DateFormat.Equals("relative", StringComparison.OrdinalIgnoreCase),
             ColorDepth = TerminalScreen.ParseColorDepth(config.Tui.ColorDepth),
             Version = RetraceVersion.Current
@@ -302,6 +304,9 @@ public static class CliApp
     private static Command BuildSourcesCommand(RetraceHost host, TextWriter stdout)
     {
         var command = new Command("sources", "List the session sources and whether each is readable.");
+        command.Aliases.Add("providers");
+        command.Subcommands.Add(BuildSourcePolicyCommand(host, stdout, enabled: true));
+        command.Subcommands.Add(BuildSourcePolicyCommand(host, stdout, enabled: false));
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var catalog = await host.GetServiceAsync<SessionCatalog>(cancellationToken).ConfigureAwait(false);
@@ -368,6 +373,55 @@ public static class CliApp
             return 0;
         });
 
+        return command;
+    }
+
+    private static Command BuildSourcePolicyCommand(RetraceHost host, TextWriter stdout, bool enabled)
+    {
+        var names = new Argument<string[]>("provider")
+        {
+            Description = "Provider ids, comma-separated or space-separated. copilot selects both Copilot providers; all selects every provider.",
+            Arity = ArgumentArity.OneOrMore
+        };
+        var indexOnly = new Option<bool>("--index-only")
+        {
+            Description = "Change default indexing only. Existing indexed sessions remain searchable; explicit --source builds are still allowed."
+        };
+        var command = new Command(enabled ? "enable" : "disable", enabled
+            ? "Enable providers, or restore their default indexing with --index-only."
+            : "Disable providers everywhere, or skip their default indexing with --index-only.");
+        command.Arguments.Add(names);
+        command.Options.Add(indexOnly);
+        command.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var config = await host.GetConfigAsync(cancellationToken).ConfigureAwait(false);
+            var ids = SourceSelection.Resolve(parseResult.GetValue(names) ?? [], SourcesConfig.Ids);
+            var indexing = parseResult.GetValue(indexOnly);
+            foreach (var id in ids)
+            {
+                config = ConfigStore.Set(config, $"sources.{id}.{(indexing ? "indexByDefault" : "enabled")}", enabled ? "true" : "false");
+            }
+
+            await host.Store.SaveAsync(config, cancellationToken).ConfigureAwait(false);
+            if (CommonOptions.GetFormat(parseResult) != OutputFormat.Text)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(ids.Select(id => new
+                {
+                    id,
+                    enabled = config.Sources.IsEnabled(id),
+                    indexByDefault = config.Sources.Get(id)!.IndexByDefault
+                }), RetraceJson.IndentedOptions));
+            }
+            else
+            {
+                foreach (var id in ids)
+                {
+                    stdout.WriteLine($"{id}: {(indexing ? "default indexing" : "provider")} {(enabled ? "enabled" : "disabled")}");
+                }
+            }
+
+            return 0;
+        });
         return command;
     }
 
@@ -528,7 +582,7 @@ public static class CliApp
     {
         var filters = new FilterOptions();
         var limit = new Option<int>("--limit", "-n") { Description = "Maximum sessions to show.", DefaultValueFactory = _ => 25 };
-        var sort = new Option<string>("--sort") { Description = "Ordering: recent (default), created, or size.", DefaultValueFactory = _ => "recent" };
+        var sort = new Option<string>("--sort") { Description = "Ordering: recent (default), oldest, created, provider, title, or size.", DefaultValueFactory = _ => "recent" };
 
         var command = new Command("list", "List sessions, most recently updated first.");
         filters.AddTo(command);
@@ -973,9 +1027,15 @@ public static class CliApp
 
     private static Command BuildIndexCommand(RetraceHost host, TextWriter stdout, TextWriter stderr)
     {
-        var sourceOption = new Option<string[]>("--source", "-s")
+        var sourceOption = new Option<string[]>("--source", "--provider", "-s")
         {
             Description = "Restrict to these sources. Repeatable.",
+            AllowMultipleArgumentsPerToken = true
+        };
+
+        var excludeSource = new Option<string[]>("--exclude-source", "--exclude-provider")
+        {
+            Description = "Skip these providers for this build only. Repeatable; accepts comma-separated ids and copilot for both Copilot providers.",
             AllowMultipleArgumentsPerToken = true
         };
 
@@ -1005,6 +1065,7 @@ public static class CliApp
 
         var build = new Command("build", "Build or update the search index.");
         build.Options.Add(sourceOption);
+        build.Options.Add(excludeSource);
         build.Options.Add(force);
         build.Options.Add(prune);
         build.Options.Add(noEmbed);
@@ -1015,6 +1076,8 @@ public static class CliApp
 
         var refresh = new Command("refresh", "Update the index with sessions that changed since the last run.");
         refresh.Options.Add(sourceOption);
+        refresh.Options.Add(excludeSource);
+        refresh.Options.Add(noEmbed);
         refresh.Options.Add(backfill);
         refresh.Options.Add(since);
         refresh.Options.Add(until);
@@ -1099,6 +1162,7 @@ public static class CliApp
             var options = new IndexBuildOptions
             {
                 SourceIds = parseResult.GetValue(sourceOption) ?? [],
+                ExcludedSourceIds = parseResult.GetValue(excludeSource) ?? [],
                 Force = parseResult.GetValue(force),
                 Prune = parseResult.GetValue(prune),
                 Embed = !parseResult.GetValue(noEmbed),
@@ -1440,7 +1504,11 @@ public static class CliApp
     {
         "created" => SessionSortOrder.Created,
         "size" => SessionSortOrder.Size,
-        _ => SessionSortOrder.Recent
+        "oldest" => SessionSortOrder.Oldest,
+        "provider" or "source" => SessionSortOrder.Provider,
+        "title" => SessionSortOrder.Title,
+        null or "recent" or "newest" => SessionSortOrder.Recent,
+        _ => throw new RetraceException("--sort expects recent, oldest, created, provider, title, or size.")
     };
 
     private static SearchMode ParseSearchMode(string? value) => value?.Trim().ToLowerInvariant() switch

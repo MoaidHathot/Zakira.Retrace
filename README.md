@@ -54,6 +54,7 @@ of what is possible; the alternative would be a command that looks like it worke
 ```
 retrace [tui] [query]           Browse, search, read, and resume interactively (the default)
 retrace sources                 List sources and whether each is readable
+retrace sources enable|disable <provider> [--index-only]
 retrace doctor                  Check config, sources, index, and models
 retrace info                    Resolved paths, model, and search settings
 
@@ -80,9 +81,11 @@ you would otherwise chain
 three commands together for bound to single keys.
 
 ```
-╭─ ◆ retrace ─────────────────────────────────────── hybrid · 12,039 indexed · v0.3.0 ─╮
+╭─ ◆ retrace ─────────────────────────────────────── hybrid · 12,039 indexed · v0.4.0 ─╮
 │ ❯ retry backoff▏                                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────╯
+ F2 providers: all · time: all time
+ F3 filters · order: relevance · group: none
 ╭─ Matches · 4 ────────────────────── 160 ms ─╮╭─ Preview ─────────── opencode/ses_3aa5f96a ─╮
 │▎ 3d ago   ● opencode Fix retry logic in Htt… ││ Matches  2                                   │
 │▎          assistant  …add exponential backo… ││ assistant #3  …add exponential backoff to the│
@@ -105,6 +108,9 @@ session was recorded in. When the harness exits, so does Retrace.
 | Key | Action |
 |---|---|
 | type, `/` | search as you type; empty query shows recent sessions |
+| `F2`, `p` | provider picker: `Space` toggles each provider, `a` selects all, `n` selects none |
+| `F3`, `f` | filters: time window, ordering, grouping, current directory, and archived sessions |
+| `O`, `b`, `0` | cycle ordering, cycle grouping, reset all filters while keeping search text |
 | `↑`/`↓` `j`/`k`, `g`/`G`, `PgUp`/`PgDn` | move |
 | `Enter`, `l` | open the reader (full transcript, `n`/`N` jump between matches, `]`/`[` between turns) |
 | `Tab`, `J`/`K` | focus or scroll the preview |
@@ -114,10 +120,15 @@ session was recorded in. When the harness exits, so does Retrace.
 | `e` | export the transcript as Markdown into the current directory |
 | `t` | tag the session (`-name` removes) |
 | `i` | session details |
-| `s`, `w`, `a`, `m` | cycle source filter, toggle current-directory filter, toggle archived, cycle search mode |
-| `x`, `z` | show or hide tool output and reasoning |
+| `s`, `w`, `a`, `m` | cycle a single provider, toggle current-directory filter, toggle archived, cycle search mode |
+| `x`, `z`, `v` | toggle tool output and diffs, reasoning, rich Markdown / literal preview |
 | `Ctrl+R` | refresh the index (keyword-only, like the automatic top-up) and re-run the query |
-| `?` | every key |
+| `?`, `F1` | scrollable help, including search syntax (`j`/`k`, `PgUp`/`PgDn`, `Home`/`End`) |
+
+Letter shortcuts apply after leaving the search box with `Esc`. `F1`, `F2`, and `F3` also work
+while typing. The provider and filter rows beneath the search box are clickable and show the
+active scope even while a search is running. In the filter panel, use `↑`/`↓` to move and
+`Space` or `←`/`→` to change a setting. Changes apply immediately; `Enter` or `Esc` closes the panel.
 
 The mouse works too — wheel to scroll whichever pane it is over, click to select, click again to
 open — and `--no-mouse` (or `tui.mouse: false`) gives it back to the terminal when you would
@@ -129,16 +140,24 @@ sixteen elsewhere, and honours `NO_COLOR`. `tui.colorDepth` overrides the detect
 left at the terminal's own foreground, so the browser sits inside your theme rather than on top of
 it.
 
-Nothing slow ever runs in front of a keystroke. The embedding model is loaded once at start-up in
-the background, the index top-up that the CLI performs inline runs in the background too (the
-status bar shows it), and searches are queued one at a time so typing quickly never stacks work
-behind itself. Previous results stay on screen, dimmed, until the current ones arrive.
+Search and source reads run in the background. The embedding model is loaded once, independently
+of the index top-up (the status bar shows progress). Searches are debounced and run one at a time;
+typing or changing filters cancels obsolete work, including long-running SQLite scans. Late results
+and errors are discarded. Previous results stay on screen, dimmed, until the current ones arrive;
+Enter waits for current results before opening or picking a session. Formatted previews are cached
+between frames, and the header reads lightweight index metadata instead of scanning vector coverage.
+
+`tui.searchDebounceMilliseconds` controls the typing delay (default `120`, range `0`–`1000`).
+Set it to `0` for immediate queries or increase it to reduce work while typing. Provider/time
+changes apply immediately, and ordering/grouping existing search results does not repeat retrieval.
 
 The `tui` command takes the same filters as `list` and `search`, so `retrace tui --here` starts
 scoped to the current directory and `retrace tui --source opencode "connection pool"` starts with a
 query already running.
 
 ### Shell integration
+
+`retrace tui "provider:opencode since:7d retry"` starts with search-box filters as well as text.
 
 `retrace tui --pick dir|uri|id|command` turns the browser into a picker: Enter prints the chosen
 value to stdout and exits, while the interface itself draws on stderr. That is what makes it usable
@@ -157,6 +176,42 @@ alias rr='eval "$(retrace tui --pick command)"'   # pick a session, run its resu
 
 ### Filters
 
+#### In the TUI search box
+
+Combine ordinary text with filters directly in the search box:
+
+```text
+provider:opencode retry backoff
+provider:opencode,copilot-vscode since:7d connection pooling
+provider:copilot last:month sort:newest group:provider
+-provider:copilot-cli since:2026-10-01 until:2026-10-31
+repo:"My Project" agent:build model:claude tag:bugfix retry
+```
+
+- **Providers:** `provider:` and `source:` are aliases. Names are case-insensitive; comma-separated
+  or repeated filters select multiple providers. `copilot` means both Copilot CLI and VS Code;
+  `vscode` means Copilot in VS Code. `-provider:` excludes providers. `provider:none` selects none.
+  Disabled providers are unavailable here. A typed provider filter overrides the picker selection;
+  changing the picker updates that scope and removes the corresponding query filters.
+- **Time:** `since:` / `until:` are inclusive and use the session's last update. A bare upper date
+  includes the whole local day. Durations include `7d`, `12h`, `30m`, and `2w`. `last:week` means
+  the preceding seven days; `last:month` means a rolling calendar month. The panel offers all time,
+  last 24 hours, last seven days, last month, last 90 days, and last year. Exact custom ranges use
+  `since:` and `until:` in the search box.
+- **Order:** `sort:relevance|newest|oldest|provider|title|size`. Size means message count. Empty-text
+  browsing orders the index before applying the list limit. Search orders the returned best matches
+  (up to `tui.searchLimit`); provider and time filters always apply across the index before retrieval.
+- **Groups:** `group:none|provider|day|week|month`. Time groups use local update dates, with weeks
+  starting on Monday. Group headers are not selectable; keyboard and mouse movement select sessions.
+- **Metadata:** `repo:`, `agent:`, `model:`, and repeated `tag:` filters also work. Quote values
+  containing spaces. A whole quoted phrase such as `"provider:opencode"` is literal search text.
+
+Filters alone browse matching sessions. Selecting no providers returns no results. `0` in the
+list or filter panel resets all filters, including initial CLI filters, while retaining your words.
+Invalid filters show an explanation instead of silently searching everything.
+
+#### CLI filters
+
 `list` and `search` share the same filters, so learning them once is enough:
 
 ```bash
@@ -166,6 +221,19 @@ retrace list --repo Orchestra --agent build
 retrace list --source opencode --model claude-opus-5
 retrace list --workspace P:\Github\MyProject --min-messages 10
 ```
+
+`--provider` is an alias for `--source`. Use comma-separated names or repeat the option for multiple
+providers: `--provider opencode,copilot-cli`. `list --sort` accepts `recent`, `oldest`, `created`,
+`provider`, `title`, and `size`.
+
+### Preview and reader
+
+The preview and full-screen reader render headings, emphasis, links, lists, quotes, tables, and
+fenced code with language labels and syntax accents. Code keeps its indentation; long paths and
+wide Unicode text wrap to the available columns. `x` includes tool arguments/output and coloured
+diffs, `z` includes reasoning, and `v` switches to literal Markdown when you need the original
+markup. Set `tui.richPreview` to `false` to start in literal mode. Both panes load the next page when
+you scroll to the end of a truncated transcript.
 
 ### Output
 
@@ -238,10 +306,29 @@ retrace index refresh            # incremental
 retrace index build --force      # re-read everything
 retrace index build --prune      # drop sessions deleted from their source
 retrace index build --no-embed   # keyword-only, much faster
+retrace index build --exclude-provider copilot --no-embed  # skip both Copilot providers this time
 retrace index status
 ```
 
 ### Choosing what gets indexed by default
+
+Provider controls are available as commands (`providers` is an alias for `sources`):
+
+```bash
+retrace sources disable copilot --index-only    # skip both Copilot providers in default builds/top-ups
+retrace sources enable copilot-cli --index-only # restore default indexing for Copilot CLI
+retrace sources disable copilot-cli             # hide it from listing, searching, reading, and indexing
+retrace sources enable copilot-cli              # make it available again
+```
+
+Names are case-insensitive; `copilot` selects both Copilot providers, `vscode` selects Copilot in
+VS Code, and `all` selects every provider. These commands persist the corresponding configuration
+setting. Disabling a provider also hides its previously indexed sessions; re-enabling makes them
+available again without rebuilding. `--index-only` changes default indexing without changing
+whether the provider is enabled.
+
+For a single build or refresh, use `--exclude-source` (alias `--exclude-provider`). Exclusions win
+over explicit inclusions and do not change configuration. Build output names excluded providers.
 
 Not every harness deserves the same share of a build. A Copilot CLI that automation drives all day
 can hold ten or twenty thousand sessions you will never search, and reading each one is what makes
@@ -514,6 +601,9 @@ dotnet test Zakira.Retrace.slnx
 ```
 
 Requires the .NET 10 SDK.
+
+See [search-experience verification](docs/search-experience-verification.md) for the acceptance
+coverage, reproducible search/rendering benchmarks, and headless TUI snapshot commands.
 
 The repository's `NuGet.config` maps packages to the private proxy feeds configured on the
 maintainer's machines and does not declare nuget.org. On a machine with ordinary nuget.org access

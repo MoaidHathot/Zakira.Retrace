@@ -274,6 +274,62 @@ public sealed class CliEndToEndTests
     }
 
     [Fact]
+    public async Task Provider_commands_persist_separate_enablement_and_default_indexing_controls()
+    {
+        using var runner = new RetraceRunner();
+        var disabled = await runner.RunAsync("providers", "disable", "copilot", "--index-only", "--output", "json");
+        disabled.ExitCode.Should().Be(0, disabled.All);
+        using var document = JsonDocument.Parse(disabled.StandardOutput);
+        document.RootElement.GetArrayLength().Should().Be(2);
+        document.RootElement.EnumerateArray().Should().AllSatisfy(provider =>
+        {
+            provider.GetProperty("enabled").GetBoolean().Should().BeTrue();
+            provider.GetProperty("indexByDefault").GetBoolean().Should().BeFalse();
+        });
+
+        (await runner.RunAsync("sources", "disable", "COPILOT-CLI")).ExitCode.Should().Be(0);
+        (await runner.RunAsync("config", "get", "sources.copilot-cli.enabled")).StandardOutput.Trim().Should().Be("false");
+        (await runner.RunAsync("sources", "enable", "copilot-cli")).ExitCode.Should().Be(0);
+        (await runner.RunAsync("config", "get", "sources.copilot-cli.indexByDefault")).StandardOutput.Trim().Should().Be("false");
+        (await runner.RunAsync("providers", "enable", "copilot", "--index-only")).ExitCode.Should().Be(0);
+        (await runner.RunAsync("config", "get", "sources.copilot-cli.indexByDefault")).StandardOutput.Trim().Should().Be("true");
+    }
+
+    [Theory]
+    [InlineData("build")]
+    [InlineData("refresh")]
+    public async Task Index_exclusions_are_available_on_both_build_commands(string verb)
+    {
+        using var runner = new RetraceRunner();
+        var result = await runner.RunAsync("index", verb, "--provider", "copilot", "--exclude-provider", "copilot", "--no-embed", "--output", "json");
+        result.ExitCode.Should().Be(0, result.All);
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        document.RootElement.GetProperty("sources").EnumerateArray().Should().AllSatisfy(provider =>
+            provider.GetProperty("skipReason").GetString().Should().Contain("excluded"));
+        document.RootElement.GetProperty("sessionsIndexed").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Invalid_provider_changes_do_not_partially_update_the_config()
+    {
+        using var runner = new RetraceRunner();
+        var result = await runner.RunAsync("sources", "disable", "opencode", "copliot");
+        result.ExitCode.Should().Be(1);
+        result.StandardError.Should().Contain("copliot");
+        (await runner.RunAsync("config", "get", "sources.opencode.enabled")).StandardOutput.Trim().Should().Be("true");
+    }
+
+    [Fact]
+    public async Task A_provider_option_before_search_text_does_not_consume_the_query()
+    {
+        using var runner = new RetraceRunner();
+        var result = await runner.RunAsync("search", "--provider", "opencode", "retry", "--lexical-only");
+        result.ExitCode.Should().Be(3, result.All);
+        result.StandardError.Should().Contain("retrace index build");
+        result.StandardError.Should().NotContain("Required argument missing");
+    }
+
+    [Fact]
     public async Task Running_with_no_arguments_points_at_help_and_exits_non_zero()
     {
         using var runner = new RetraceRunner();

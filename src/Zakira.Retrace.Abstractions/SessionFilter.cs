@@ -10,7 +10,16 @@ public enum SessionSortOrder
     Created,
 
     /// <summary>Largest session first, by message count.</summary>
-    Size
+    Size,
+
+    /// <summary>Least recently updated first.</summary>
+    Oldest,
+
+    /// <summary>Provider id, then most recently updated.</summary>
+    Provider,
+
+    /// <summary>Session title, alphabetically.</summary>
+    Title
 }
 
 /// <summary>

@@ -77,6 +77,8 @@ public sealed class IndexTests
 
         public List<SessionTranscript> Transcripts { get; } = transcripts;
 
+        public bool FailReads { get; set; }
+
         public ValueTask<SourceAvailability> ProbeAsync(CancellationToken cancellationToken) =>
             ValueTask.FromResult(SourceAvailability.Available("(memory)", Transcripts.Count));
 
@@ -85,12 +87,13 @@ public sealed class IndexTests
             await Task.CompletedTask;
             foreach (var transcript in Transcripts)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 yield return transcript.Summary;
             }
         }
 
         public ValueTask<SessionTranscript?> GetAsync(string nativeId, TranscriptOptions options, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(Transcripts.FirstOrDefault(item => item.Summary.Ref.NativeId == nativeId));
+            FailReads ? throw new IOException("temporarily unreadable") : ValueTask.FromResult(Transcripts.FirstOrDefault(item => item.Summary.Ref.NativeId == nativeId));
 
         public ValueTask<ResumeCommand?> GetResumeCommandAsync(string nativeId, ResumeOptions options, CancellationToken cancellationToken) =>
             ValueTask.FromResult<ResumeCommand?>(null);
@@ -131,7 +134,8 @@ public sealed class IndexTests
         string assistantText,
         DateTimeOffset? updated = null,
         string workspace = @"P:\Github\Fixture",
-        string contentHash = "v1")
+        string contentHash = "v1",
+        string provider = "fake")
     {
         // Truncated to whole milliseconds because that is the precision every real harness stores
         // and every watermark round-trips through. Leaving sub-millisecond ticks here would make
@@ -143,7 +147,7 @@ public sealed class IndexTests
         {
             Summary = new SessionSummary
             {
-                Ref = new SessionRef("fake", id),
+                Ref = new SessionRef(provider, id),
                 Title = title,
                 Preview = userText,
                 Workspace = new WorkspaceInfo { Path = workspace },
@@ -183,10 +187,14 @@ public sealed class IndexTests
         config.Index.Path = Path.Combine(temp.Path, "index.db");
 
         var paths = new RetracePaths();
-        var source = new FakeSource("fake", transcripts);
+        // Keep the original mutable list for incremental tests with one provider.
+        var sources = transcripts.Select(item => item.Summary.Ref.SourceId).Distinct(StringComparer.Ordinal).ToArray();
+        var providers = sources.Length <= 1
+            ? [new FakeSource(sources.FirstOrDefault() ?? "fake", transcripts)]
+            : sources.Select(id => new FakeSource(id, [.. transcripts.Where(item => item.Summary.Ref.SourceId == id)])).ToArray();
         var embeddingFactory = factory ?? new FakeEmbeddingFactory();
 
-        var builder = new IndexBuilder(paths, config, [source], embeddingFactory, NullLogger<IndexBuilder>.Instance);
+        var builder = new IndexBuilder(paths, config, providers, embeddingFactory, NullLogger<IndexBuilder>.Instance);
         var searcher = new IndexSearcher(paths, config, embeddingFactory);
 
         return (builder, searcher, config);
@@ -1154,6 +1162,139 @@ public sealed class IndexTests
 
         byWorkspace.Should().ContainSingle().Which.Session.Ref.NativeId.Should().Be("s1");
         bySince.Should().ContainSingle().Which.Session.Ref.NativeId.Should().Be("s1");
+    }
+
+    [Fact]
+    public async Task Provider_and_date_filters_are_applied_before_the_keyword_candidate_limit()
+    {
+        using var temp = new TempDirectory();
+        var now = DateTimeOffset.UtcNow;
+        var transcripts = new List<SessionTranscript>
+        {
+            MakeTranscript("distractor", "backoff backoff backoff backoff", "backoff backoff backoff backoff", "backoff backoff backoff backoff", now.AddDays(-60), provider: "copilot-cli"),
+            MakeTranscript("wanted", "A much longer title", "This lengthy question mentions backoff among many unrelated words about a recent investigation", "Detailed answer with other vocabulary", now.AddDays(-1), provider: "opencode")
+        };
+        var (builder, searcher, config) = CreateIndex(temp, transcripts);
+        await builder.BuildAsync(new IndexBuildOptions { Embed = false }, TestContext.Current.CancellationToken);
+        config.Search.LexicalCandidateCap = 1;
+
+        var query = new SearchQuery { Text = "backoff", Mode = SearchMode.Lexical };
+        (await searcher.SearchAsync(query, TestContext.Current.CancellationToken)).Should()
+            .ContainSingle().Which.Session.Ref.NativeId.Should().Be("distractor", "this fixture puts the wanted session outside the unfiltered cap");
+
+        foreach (var filter in new[]
+        {
+            new SessionFilter { SourceIds = ["OPENCODE"] },
+            new SessionFilter { Since = now.AddDays(-7) },
+            new SessionFilter { Since = now.AddDays(-7), Until = now, SourceIds = ["opencode"] }
+        })
+        {
+            var hits = await searcher.SearchAsync(query with { Filter = filter }, TestContext.Current.CancellationToken);
+            hits.Should().ContainSingle().Which.Session.Ref.NativeId.Should().Be("wanted");
+        }
+    }
+
+    private sealed class ConstantEmbeddingFactory : IEmbeddingProviderFactory
+    {
+        public string ModelId => "constant";
+        public bool IsAvailable => true;
+        public Task<IEmbeddingProvider> CreateAsync(CancellationToken cancellationToken) => Task.FromResult<IEmbeddingProvider>(new ConstantEmbeddingProvider());
+    }
+
+    private sealed class ConstantEmbeddingProvider : IEmbeddingProvider
+    {
+        public string ModelId => "constant";
+        public int Dimensions => 2;
+        public ValueTask<IReadOnlyList<float[]>> EmbedAsync(IReadOnlyList<string> texts, EmbeddingSide side, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<float[]>>([.. texts.Select(_ => new float[] { 1, 0 })]);
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task Semantic_matches_keep_excerpts_even_without_any_literal_keyword_overlap()
+    {
+        using var temp = new TempDirectory();
+        var (builder, searcher, _) = CreateIndex(temp,
+            [MakeTranscript("semantic", "An explanation of the implementation", "A question with plenty of meaningful words", "An answer discussing a completely different vocabulary")],
+            new ConstantEmbeddingFactory());
+        await builder.BuildAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+
+        var hits = await searcher.SearchAsync(new SearchQuery { Text = "absentkeyword", Mode = SearchMode.Semantic }, TestContext.Current.CancellationToken);
+        hits.Should().ContainSingle();
+        hits[0].Snippets.Should().NotBeEmpty();
+        hits[0].Snippets.Should().AllSatisfy(snippet => snippet.Text.Should().NotBeNullOrWhiteSpace());
+    }
+
+    [Fact]
+    public async Task Provider_scoped_resolution_never_falls_back_to_another_provider()
+    {
+        using var temp = new TempDirectory();
+        var (builder, searcher, _) = CreateIndex(temp,
+        [
+            MakeTranscript("prefix-aaaa", "One", "question", "answer", provider: "opencode"),
+            MakeTranscript("prefix-bbbb", "Two", "question", "answer", provider: "copilot-cli")
+        ]);
+        await builder.BuildAsync(new IndexBuildOptions { Embed = false }, TestContext.Current.CancellationToken);
+        (await searcher.ResolveAsync("opencode/prefix", TestContext.Current.CancellationToken))!.Title.Should().Be("One");
+        (await searcher.ResolveAsync("retrace://copilot-cli/prefix", TestContext.Current.CancellationToken))!.Title.Should().Be("Two");
+        (await searcher.ResolveAsync("copilot-vscode/prefix", TestContext.Current.CancellationToken)).Should().BeNull();
+        (await searcher.ResolveAsync("prefix%", TestContext.Current.CancellationToken)).Should().BeNull("percent is a literal part of a native id");
+    }
+
+    [Fact]
+    public async Task Tags_remain_visible_after_filtering_searching_and_reading_a_session_again()
+    {
+        using var temp = new TempDirectory();
+        var transcripts = new List<SessionTranscript> { MakeTranscript("tagged", "Retry policy", "retry question", "Detailed answer about retry policies") };
+        var (builder, searcher, config) = CreateIndex(temp, transcripts);
+        await builder.BuildAsync(new IndexBuildOptions { Embed = false }, TestContext.Current.CancellationToken);
+        var tags = new TagStore(new RetracePaths(), config);
+        await tags.AddAsync("retrace://fake/tagged", ["bugfix", "http"], "manual", TestContext.Current.CancellationToken);
+        var filter = SessionFilter.All with { Tags = ["BUGFIX", "http"] };
+        var sessions = await searcher.ListAsync(filter, TestContext.Current.CancellationToken);
+        sessions.Should().ContainSingle().Which.Tags.Should().BeEquivalentTo("bugfix", "http");
+        var hits = await searcher.SearchAsync(new SearchQuery { Text = "retry", Filter = filter, Mode = SearchMode.Lexical }, TestContext.Current.CancellationToken);
+        hits.Should().ContainSingle().Which.Session.Tags.Should().BeEquivalentTo("bugfix", "http");
+        var catalog = new SessionCatalog(config, [new FakeSource("fake", transcripts)], searcher, builder, NullLogger<SessionCatalog>.Instance);
+        var transcript = await catalog.GetTranscriptAsync("retrace://fake/tagged", TranscriptOptions.Default, TestContext.Current.CancellationToken);
+        transcript.Summary.Tags.Should().BeEquivalentTo("bugfix", "http");
+    }
+
+    [Fact]
+    public async Task A_failed_read_remains_retryable_and_an_explicit_refresh_clears_the_backlog_notice()
+    {
+        using var temp = new TempDirectory();
+        var config = new RetraceConfig();
+        config.Index.Path = Path.Combine(temp.Path, "index.db");
+        config.Index.AutoRefreshMinIntervalMinutes = 0;
+        config.Embeddings.Enabled = false;
+        var source = new FakeSource("fake", [MakeTranscript("seed", "Seed", "a question", "an answer", DateTimeOffset.UtcNow.AddDays(-2))]);
+        var paths = new RetracePaths();
+        var factory = new FakeEmbeddingFactory();
+        var builder = new IndexBuilder(paths, config, [source], factory, NullLogger<IndexBuilder>.Instance);
+        var searcher = new IndexSearcher(paths, config, factory);
+        var catalog = new SessionCatalog(config, [source], searcher, builder, NullLogger<SessionCatalog>.Instance);
+        await builder.BuildAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+        source.Transcripts.Add(MakeTranscript("new", "New session", "retry this question", "retry this answer", DateTimeOffset.UtcNow.AddDays(-1)));
+        source.FailReads = true;
+        await catalog.TopUpIfStaleAsync(null, TestContext.Current.CancellationToken);
+        catalog.PendingSources.Should().Equal("fake");
+
+        source.FailReads = false;
+        var result = await catalog.RefreshIndexAsync(new IndexBuildOptions(), TestContext.Current.CancellationToken);
+        result.SessionsIndexed.Should().Be(1, "a failed read must not advance the watermark past the missing session");
+        catalog.PendingSources.Should().BeEmpty();
+        (await searcher.ListAsync(SessionFilter.All, TestContext.Current.CancellationToken)).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Cancelled_live_listing_is_not_reported_as_an_empty_result_set()
+    {
+        using var temp = new TempDirectory();
+        var (catalog, _, _, _) = CreateCatalog(temp, [MakeTranscript("live", "Live", "question", "answer")], TimeSpan.Zero);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => catalog.ListAsync(SessionFilter.All, QueryMode.Live, cancellation.Token));
     }
 
     [Fact]

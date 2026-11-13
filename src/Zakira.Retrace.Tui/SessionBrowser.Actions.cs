@@ -484,10 +484,12 @@ public sealed partial class SessionBrowser
             try
             {
                 var built = await backend.RefreshIndexAsync(progress, lifetime.Token).ConfigureAwait(false);
+                var refreshed = await backend.GetIndexInfoAsync(lifetime.Token).ConfigureAwait(false);
                 Post(() =>
                 {
                     refreshing = false;
                     activity = null;
+                    indexInfo = refreshed;
                     var skipped = built.Sources.Where(source => source.SkipReason is not null).Select(source => source.SourceId).ToArray();
                     var note = skipped.Length > 0 ? $" \u00b7 skipped {string.Join(", ", skipped)}" : string.Empty;
                     SetStatus($"indexed {built.SessionsIndexed:N0} session(s) in {built.Duration.TotalSeconds:F1}s{note}", StatusKind.Ok, milliseconds: 6000);

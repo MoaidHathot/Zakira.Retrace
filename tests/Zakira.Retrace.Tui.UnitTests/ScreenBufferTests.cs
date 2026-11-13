@@ -57,6 +57,15 @@ public sealed class ScreenBufferTests
     }
 
     [Fact]
+    public void Transcript_controls_never_become_terminal_commands_or_line_breaks()
+    {
+        var buffer = new ScreenBuffer(60, 1);
+        buffer.Write(0, 0, "hello\u001b[2J\u009b31m\n\r\b\aworld", Style.Plain);
+        buffer.ToText().Should().NotContain("\u001b").And.NotContain("\u009b").And.NotContain("\r").And.NotContain("\a");
+        buffer.RenderRows()[0].Should().NotContain("\u001b[2J");
+    }
+
+    [Fact]
     public void Styles_become_sgr_sequences_only_when_they_change()
     {
         var buffer = new ScreenBuffer(6, 1);

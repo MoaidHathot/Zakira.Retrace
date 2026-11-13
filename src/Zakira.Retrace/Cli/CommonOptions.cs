@@ -1,6 +1,7 @@
 using System.CommandLine;
-using System.Globalization;
 using Zakira.Retrace.Abstractions;
+using Zakira.Retrace.Core.Configuration;
+using Zakira.Retrace.Core.Search;
 
 namespace Zakira.Retrace.Cli;
 
@@ -71,10 +72,12 @@ internal static class CommonOptions
 internal sealed class FilterOptions
 {
     /// <summary>Restricts to specific sources.</summary>
-    public Option<string[]> Source { get; } = new("--source", "-s")
+    public Option<string[]> Source { get; } = new("--source", "--provider", "-s")
     {
         Description = "Restrict to these sources (opencode, copilot-cli, copilot-vscode). Repeatable.",
-        AllowMultipleArgumentsPerToken = true
+        // A second value could be the optional TUI query. Repeat --source or use commas instead
+        // of greedily consuming positional search text as another provider id.
+        AllowMultipleArgumentsPerToken = false
     };
 
     /// <summary>Restricts to a workspace directory.</summary>
@@ -179,7 +182,7 @@ internal sealed class FilterOptions
 
         return new SessionFilter
         {
-            SourceIds = parseResult.GetValue(Source) ?? [],
+            SourceIds = SourceSelection.Resolve(parseResult.GetValue(Source) ?? [], SourcesConfig.Ids),
             WorkspacePath = string.IsNullOrWhiteSpace(workspace) ? null : Path.GetFullPath(workspace),
             Repository = parseResult.GetValue(Repository),
             Branch = parseResult.GetValue(Branch),
@@ -205,41 +208,5 @@ internal sealed class FilterOptions
     /// Relative durations are what people actually type when looking for recent work, and typing
     /// "what did I do in the last three days" as an absolute date is friction with no upside.
     /// </remarks>
-    public static DateTimeOffset? ParseTimeBound(string? value, bool isLowerBound)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var trimmed = value.Trim();
-
-        if (trimmed.Length > 1 && char.IsDigit(trimmed[0]))
-        {
-            var unit = char.ToLowerInvariant(trimmed[^1]);
-            if (unit is 'd' or 'h' or 'm' or 'w'
-                && double.TryParse(trimmed[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var amount))
-            {
-                var span = unit switch
-                {
-                    'w' => TimeSpan.FromDays(amount * 7),
-                    'd' => TimeSpan.FromDays(amount),
-                    'h' => TimeSpan.FromHours(amount),
-                    _ => TimeSpan.FromMinutes(amount)
-                };
-
-                return DateTimeOffset.UtcNow - span;
-            }
-        }
-
-        if (DateTimeOffset.TryParse(trimmed, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed))
-        {
-            // A bare date as an upper bound means "through the end of that day"; without this,
-            // `--until 2026-01-31` would silently exclude everything on the 31st.
-            var isDateOnly = trimmed.Length <= 10 && !trimmed.Contains(':', StringComparison.Ordinal);
-            return !isLowerBound && isDateOnly ? parsed.AddDays(1).AddTicks(-1) : parsed;
-        }
-
-        throw new RetraceException($"Could not parse '{value}' as a date or duration. Try 2026-01-31, or 7d / 12h / 30m.");
-    }
+    public static DateTimeOffset? ParseTimeBound(string? value, bool isLowerBound) => TimeBounds.Parse(value, isLowerBound);
 }

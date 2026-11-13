@@ -53,4 +53,15 @@ public sealed class TextWidthTests
     [Fact]
     public void Wrap_preserves_an_empty_paragraph_as_one_blank_line() =>
         TextWidth.Wrap(string.Empty, 20).Should().Equal(string.Empty);
+
+    [Theory]
+    [InlineData("中文中文中文中文", 5)]
+    [InlineData("😀😀😀😀😀", 3)]
+    [InlineData("abc中文def中文ghi", 5)]
+    public void Wide_words_wrap_without_accumulating_overwide_fragments(string text, int width)
+    {
+        var lines = TextWidth.Wrap(text, width).ToArray();
+        lines.Should().AllSatisfy(line => TextWidth.Of(line).Should().BeLessThanOrEqualTo(width));
+        string.Concat(lines).Should().Be(text);
+    }
 }

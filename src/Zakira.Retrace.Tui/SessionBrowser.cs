@@ -25,7 +25,6 @@ namespace Zakira.Retrace.Tui;
 /// </remarks>
 public sealed partial class SessionBrowser : IDisposable
 {
-    private const int DebounceMilliseconds = 160;
     private const int PreviewDebounceMilliseconds = 90;
     private const int SpinnerIntervalMilliseconds = 80;
 
@@ -41,6 +40,7 @@ public sealed partial class SessionBrowser : IDisposable
 
     private ScreenBuffer buffer;
     private bool running = true;
+    private bool disposed;
     private bool dirty = true;
     private long lastSpinnerFrame = -1;
     private BrowserResult result = BrowserResult.Quit;
@@ -56,12 +56,31 @@ public sealed partial class SessionBrowser : IDisposable
     private int caret;
     private bool searchFocused = true;
     private Pane focus = Pane.List;
-    private string? sourceFilter;
+    private readonly HashSet<string> selectedProviders = new(StringComparer.OrdinalIgnoreCase);
+    private SessionFilter baseFilter;
+    private BrowserQuery parsedQuery = new();
+    private string? querySyntaxError;
+    private BrowserSort sortOrder;
+    private BrowserGroup groupBy;
+    private string? timeWindow;
+    private DateTimeOffset? since;
+    private DateTimeOffset? until;
+    private int filterCursor;
+    private int filterScroll;
+    private IReadOnlyList<string> highlightTerms = [];
+    private List<string> filterSummary = [];
+    private int filterSummaryRevision = -1;
+    private int filterSummaryWidth;
+    private List<DisplayLine> listLines = [];
+    private int[] rowOffsets = [];
+
+    private sealed record DisplayLine(int RowIndex, bool Detail = false, string? Heading = null);
     private bool here;
     private bool includeArchived;
     private SearchMode searchMode;
     private bool showToolOutput;
     private bool showReasoning;
+    private bool richPreview;
 
     // One query runs at a time. A keystroke that arrives while one is in flight marks the query
     // dirty, and the latest text is run once the current one finishes. Starting a fresh search on
@@ -71,8 +90,12 @@ public sealed partial class SessionBrowser : IDisposable
     private bool queryDirty;
     private bool queryLoading;
     private bool hasLoadedOnce;
+    private bool openWhenReady;
     private string? queryError;
     private int queryGeneration;
+    private int queryRevision;
+    private int executingQueryRevision;
+    private int appliedQueryRevision = -1;
     private long? queryDueAt;
     private CancellationTokenSource? queryCancellation;
     private bool lastQueryWasSearch;
@@ -82,6 +105,7 @@ public sealed partial class SessionBrowser : IDisposable
     // ---- transcript state --------------------------------------------------------------------
 
     private SessionRef? loadedRef;
+    private SessionSummary? loadedSummary;
     private TranscriptOptions? loadedOptions;
     private SessionTranscript? transcript;
     private bool transcriptLoading;
@@ -89,16 +113,23 @@ public sealed partial class SessionBrowser : IDisposable
     private string? transcriptError;
     private long? previewDueAt;
     private CancellationTokenSource? transcriptCancellation;
+    private int transcriptGeneration;
     private IReadOnlyList<TranscriptLine> formatted = [];
+    private readonly Dictionary<int, IReadOnlyList<TranscriptLine>> formattedWidths = [];
     private int formattedWidth = -1;
     private int previewScroll;
     private int readerScroll;
+    private PreviewKey? previewKey;
+    private List<TranscriptLine> previewLines = [];
+
+    private sealed record PreviewKey(Row Row, SessionTranscript? Transcript, int Width, bool Tools, bool Reasoning, bool Rich, IReadOnlyList<string> Terms);
 
     // ---- background activity -----------------------------------------------------------------
 
     private IndexInfo? indexInfo;
     private string? activity;
     private bool refreshing;
+    private bool warming;
 
     // ---- modes and overlays ------------------------------------------------------------------
 
@@ -115,10 +146,13 @@ public sealed partial class SessionBrowser : IDisposable
         Help,
         Info,
         Confirm,
-        Input
+        Input,
+        Filters
     }
 
     private Mode mode = Mode.List;
+    private Mode helpReturnMode = Mode.List;
+    private int helpScroll;
     private ConfirmState? confirm;
     private InputState? input;
     private string? status;
@@ -163,9 +197,22 @@ public sealed partial class SessionBrowser : IDisposable
         searchMode = options.SearchMode;
         showToolOutput = options.ShowToolOutput;
         showReasoning = options.ShowReasoning;
+        richPreview = options.RichPreview;
         here = options.Filter.WorkspacePath is not null;
         includeArchived = options.Filter.IncludeArchived;
-        sourceFilter = options.Filter.SourceIds.Count == 1 ? options.Filter.SourceIds[0] : null;
+        baseFilter = options.Filter;
+        since = options.Filter.Since;
+        until = options.Filter.Until;
+        selectedProviders.UnionWith(options.Filter.SourceIds.Count == 0 ? backend.SourceIds : options.Filter.SourceIds);
+        selectedProviders.IntersectWith(backend.SourceIds);
+        sortOrder = options.Filter.Sort switch
+        {
+            SessionSortOrder.Oldest => BrowserSort.Oldest,
+            SessionSortOrder.Provider => BrowserSort.Provider,
+            SessionSortOrder.Title => BrowserSort.Title,
+            SessionSortOrder.Size => BrowserSort.Size,
+            _ => BrowserSort.Relevance
+        };
 
         if (!string.IsNullOrWhiteSpace(options.InitialQuery))
         {
@@ -274,7 +321,7 @@ public sealed partial class SessionBrowser : IDisposable
     /// <summary>Kicks off the initial query and the background start-up work. Called by <see cref="Run"/>; exposed for headless tests.</summary>
     public void Start()
     {
-        queryDueAt = clock.ElapsedMilliseconds;
+        ScheduleQuery(immediate: true);
         Tick();
         BeginStartupWork();
     }
@@ -352,17 +399,49 @@ public sealed partial class SessionBrowser : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        running = false;
         lifetime.Cancel();
-        lifetime.Dispose();
+        screen.Dispose();
+        // The host disposes the shared model after the browser. Wait for cancelled work to leave
+        // it before returning; otherwise quitting during warm-up can dispose a model still in use.
+        while (true)
+        {
+            Task[] pending;
+            lock (inFlight)
+            {
+                pending = [.. inFlight.Where(task => !task.IsCompleted)];
+            }
+
+            if (pending.Length == 0)
+            {
+                break;
+            }
+
+            try
+            {
+                Task.WhenAll(pending).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // Workers report failures through the posted queue; the terminal is restored.
+            }
+        }
+
         queryCancellation?.Dispose();
         transcriptCancellation?.Dispose();
-        screen.Dispose();
+        lifetime.Dispose();
     }
 
     // ---- loop internals ----------------------------------------------------------------------
 
     private bool IsAnimating =>
-        queryLoading || transcriptLoading || transcriptLoadingMore || refreshing || activity is not null
+        queryLoading || transcriptLoading || transcriptLoadingMore || refreshing || warming || activity is not null
         || (status is not null && statusKind == StatusKind.Busy);
 
     private void Tick()
@@ -458,6 +537,8 @@ public sealed partial class SessionBrowser : IDisposable
     private void BeginStartupWork()
     {
         var token = lifetime.Token;
+        var warmSemantic = searchMode != SearchMode.Lexical && backend.SourceIds.Count > 0;
+        refreshing = true;
 
         var task = Task.Run(async () =>
         {
@@ -466,11 +547,11 @@ public sealed partial class SessionBrowser : IDisposable
                 var info = await backend.GetIndexInfoAsync(token).ConfigureAwait(false);
                 Post(() => indexInfo = info);
 
-                if (info.SemanticAvailable && searchMode != SearchMode.Lexical)
+                if (info.SemanticAvailable && warmSemantic)
                 {
-                    Post(() => activity = "warming up semantic search");
-                    await backend.WarmUpAsync(token).ConfigureAwait(false);
-                    Post(() => activity = null);
+                    // Model initialization and the index top-up are independent. A cold model
+                    // must not delay newly indexed keyword results or disable top-up if it fails.
+                    Track(Task.Run(() => WarmSemanticAsync(token)));
                 }
 
                 Post(() => activity = "checking the index for new sessions");
@@ -481,6 +562,7 @@ public sealed partial class SessionBrowser : IDisposable
                 Post(() =>
                 {
                     activity = null;
+                    refreshing = false;
                     if (changed)
                     {
                         SetStatus("index topped up with recent sessions", StatusKind.Ok, milliseconds: 4000);
@@ -493,12 +575,14 @@ public sealed partial class SessionBrowser : IDisposable
             }
             catch (OperationCanceledException)
             {
+                Post(() => { refreshing = false; activity = null; });
             }
             catch (Exception ex)
             {
                 Post(() =>
                 {
                     activity = null;
+                    refreshing = false;
                     SetStatus($"start-up: {ex.Message}", StatusKind.Error, milliseconds: 6000);
                 });
             }
@@ -507,22 +591,73 @@ public sealed partial class SessionBrowser : IDisposable
         Track(task);
     }
 
+    private async Task WarmSemanticAsync(CancellationToken token)
+    {
+        Post(() => warming = true);
+        try
+        {
+            await backend.WarmUpAsync(token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Post(() => SetStatus($"semantic warm-up: {ex.Message}", StatusKind.Error));
+        }
+        finally
+        {
+            Post(() => warming = false);
+        }
+    }
+
     // ---- queries -----------------------------------------------------------------------------
 
     private void ScheduleQuery(bool immediate = false)
     {
-        queryDueAt = clock.ElapsedMilliseconds + (immediate ? 0 : DebounceMilliseconds);
+        queryRevision++;
+        openWhenReady = false;
+        queryCancellation?.Cancel();
+        queryDirty = false;
+        queryLoading = true;
+        queryError = null;
+        try
+        {
+            parsedQuery = BrowserQuery.Parse(query, backend.SourceIds, DateTimeOffset.UtcNow);
+            querySyntaxError = null;
+        }
+        catch (RetraceException ex)
+        {
+            querySyntaxError = ex.Message;
+        }
+
+        queryDueAt = clock.ElapsedMilliseconds + (immediate ? 0 : Math.Clamp(options.SearchDebounceMilliseconds, 0, 1000));
         dirty = true;
     }
 
     private SessionFilter BuildFilter(int limit)
     {
-        var filter = options.Filter with
+        var filter = baseFilter with
         {
             Limit = limit,
             IncludeArchived = includeArchived,
-            SourceIds = sourceFilter is null ? options.Filter.SourceIds : [sourceFilter],
-            WorkspacePath = here ? options.Filter.WorkspacePath ?? Directory.GetCurrentDirectory() : null
+            SourceIds = EffectiveProviders,
+            WorkspacePath = here ? baseFilter.WorkspacePath ?? Directory.GetCurrentDirectory() : null,
+            Since = parsedQuery.Since ?? (timeWindow is null ? since : Core.Search.TimeBounds.Parse(timeWindow, true)),
+            Until = parsedQuery.Until ?? until,
+            Repository = parsedQuery.Repository ?? baseFilter.Repository,
+            Agent = parsedQuery.Agent ?? baseFilter.Agent,
+            Model = parsedQuery.Model ?? baseFilter.Model,
+            Tags = parsedQuery.Tags.Count > 0 ? parsedQuery.Tags : baseFilter.Tags,
+            Sort = EffectiveSort switch
+            {
+                BrowserSort.Newest => SessionSortOrder.Recent,
+                BrowserSort.Oldest => SessionSortOrder.Oldest,
+                BrowserSort.Provider => SessionSortOrder.Provider,
+                BrowserSort.Title => SessionSortOrder.Title,
+                BrowserSort.Size => SessionSortOrder.Size,
+                _ => baseFilter.Sort
+            }
         };
 
         return filter;
@@ -548,7 +683,9 @@ public sealed partial class SessionBrowser : IDisposable
         queryCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var token = queryCancellation.Token;
         var generation = ++queryGeneration;
-        var text = query.Trim();
+        var revision = queryRevision;
+        executingQueryRevision = revision;
+        var text = parsedQuery.Text;
         var isSearch = text.Length > 0;
         var filter = BuildFilter(isSearch ? 0 : options.ListLimit);
         var mode = searchMode;
@@ -560,10 +697,23 @@ public sealed partial class SessionBrowser : IDisposable
         queryError = null;
         dirty = true;
 
+        if (querySyntaxError is not null || filter.Since > filter.Until)
+        {
+            ApplyQueryError(generation, revision, querySyntaxError ?? "since: must be earlier than until:.");
+            return;
+        }
+
+        if (filter.SourceIds.Count == 0)
+        {
+            ApplyResults(generation, revision, [], isSearch, text, started.Elapsed);
+            return;
+        }
+
         var task = Task.Run(async () =>
         {
             try
             {
+                token.ThrowIfCancellationRequested();
                 IReadOnlyList<Row> fetched;
 
                 if (isSearch)
@@ -587,7 +737,7 @@ public sealed partial class SessionBrowser : IDisposable
                     fetched = [.. sessions.Select(session => new Row(session, null))];
                 }
 
-                Post(() => ApplyResults(generation, fetched, isSearch, text, started.Elapsed));
+                Post(() => ApplyResults(generation, revision, fetched, isSearch, text, started.Elapsed));
             }
             catch (OperationCanceledException)
             {
@@ -595,13 +745,13 @@ public sealed partial class SessionBrowser : IDisposable
             }
             catch (IndexNotBuiltException)
             {
-                Post(() => ApplyQueryError(generation, "No index yet. Press Ctrl+R to build one (keyword-only), or run `retrace index build`."));
+                Post(() => ApplyQueryError(generation, revision, "No index yet. Press Ctrl+R to build one (keyword-only), or run `retrace index build`."));
             }
             catch (Exception ex)
             {
-                Post(() => ApplyQueryError(generation, ex.Message));
+                Post(() => ApplyQueryError(generation, revision, ex.Message));
             }
-        }, token);
+        });
 
         Track(task);
     }
@@ -622,13 +772,13 @@ public sealed partial class SessionBrowser : IDisposable
         }
         else
         {
-            queryLoading = false;
+            queryLoading = queryDueAt is not null;
         }
 
         dirty = true;
     }
 
-    private void ApplyResults(int generation, IReadOnlyList<Row> fetched, bool isSearch, string text, TimeSpan duration)
+    private void ApplyResults(int generation, int revision, IReadOnlyList<Row> fetched, bool isSearch, string text, TimeSpan duration)
     {
         if (generation != queryGeneration)
         {
@@ -637,7 +787,7 @@ public sealed partial class SessionBrowser : IDisposable
 
         // The text moved on while this ran: do not flash an intermediate result set, just run the
         // current text. The previous results stay on screen until the real answer arrives.
-        if (!string.Equals(text, query.Trim(), StringComparison.Ordinal))
+        if (revision != queryRevision)
         {
             FinishQuery(generation);
             return;
@@ -645,35 +795,53 @@ public sealed partial class SessionBrowser : IDisposable
 
         var previous = Selected?.Session.Ref;
 
-        rows = fetched;
+        rows = OrderRows(fetched);
+        RebuildListLines();
         hasLoadedOnce = true;
         lastQueryWasSearch = isSearch;
         lastExecutedQuery = text;
+        highlightTerms = TranscriptFormatter.TermsOf(text);
+        appliedQueryRevision = revision;
         lastQueryDuration = duration;
 
         var keep = previous is null ? -1 : IndexOfRef(previous);
         selected = keep >= 0 ? keep : 0;
-        listScroll = Math.Min(listScroll, Math.Max(0, selected));
+        listScroll = Math.Min(listScroll, rowOffsets.Length > 0 ? rowOffsets[selected] : 0);
         EnsureSelectionVisible();
 
         formattedWidth = -1;
         previewScroll = 0;
         SchedulePreview(immediate: true);
         FinishQuery(generation);
+        if (openWhenReady)
+        {
+            openWhenReady = false;
+            status = null;
+            OpenSelected();
+        }
     }
 
-    private void ApplyQueryError(int generation, string message)
+    private void ApplyQueryError(int generation, int revision, string message)
     {
         if (generation != queryGeneration)
         {
             return;
         }
 
+        if (revision != queryRevision)
+        {
+            FinishQuery(generation);
+            return;
+        }
+
         queryError = message;
+        openWhenReady = false;
         hasLoadedOnce = true;
         rows = [];
+        RebuildListLines();
         selected = 0;
         listScroll = 0;
+        SchedulePreview(immediate: true);
         FinishQuery(generation);
     }
 
@@ -694,12 +862,22 @@ public sealed partial class SessionBrowser : IDisposable
 
     private void SchedulePreview(bool immediate = false)
     {
+        if (Selected?.Session.Ref != loadedRef)
+        {
+            transcriptGeneration++;
+            transcriptCancellation?.Cancel();
+            transcriptLoading = false;
+            transcriptLoadingMore = false;
+            transcriptError = null;
+        }
+
         previewDueAt = clock.ElapsedMilliseconds + (immediate ? 0 : PreviewDebounceMilliseconds);
     }
 
     private TranscriptOptions CurrentTranscriptOptions => new()
     {
         IncludeToolOutput = showToolOutput,
+        IncludeDiffs = showToolOutput,
         IncludeReasoning = showReasoning,
         MaxCharacters = options.PreviewMaxCharacters,
         MaxToolOutputCharacters = 4000
@@ -710,17 +888,30 @@ public sealed partial class SessionBrowser : IDisposable
         var row = Selected;
         if (row is null)
         {
+            transcriptGeneration++;
+            transcriptCancellation?.Cancel();
             transcript = null;
             loadedRef = null;
+            loadedSummary = null;
+            loadedOptions = null;
             formatted = [];
+            transcriptLoading = false;
+            transcriptLoadingMore = false;
             transcriptError = null;
             dirty = true;
             return;
         }
 
         var wanted = CurrentTranscriptOptions;
-        if (row.Session.Ref == loadedRef && wanted == loadedOptions && (transcript is not null || transcriptLoading))
+        if (row.Session.Ref == loadedRef && wanted == loadedOptions && (transcript is not null || transcriptLoading)
+            && row.Session.UpdatedAt == loadedSummary?.UpdatedAt && row.Session.ContentHash == loadedSummary?.ContentHash)
         {
+            if (transcript is not null && !transcript.Summary.Tags.SequenceEqual(row.Session.Tags, StringComparer.OrdinalIgnoreCase))
+            {
+                transcript = transcript with { Summary = transcript.Summary with { Tags = row.Session.Tags } };
+                formattedWidth = -1;
+            }
+
             return;
         }
 
@@ -729,13 +920,16 @@ public sealed partial class SessionBrowser : IDisposable
         transcriptCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var token = transcriptCancellation.Token;
         var reference = row.Session.Ref;
+        var generation = ++transcriptGeneration;
 
         loadedRef = reference;
+        loadedSummary = row.Session;
         loadedOptions = wanted;
         transcript = null;
         formatted = [];
         formattedWidth = -1;
         transcriptLoading = true;
+        transcriptLoadingMore = false;
         transcriptError = null;
         previewScroll = 0;
         readerScroll = 0;
@@ -745,10 +939,11 @@ public sealed partial class SessionBrowser : IDisposable
         {
             try
             {
+                token.ThrowIfCancellationRequested();
                 var loaded = await backend.GetTranscriptAsync(reference, wanted, token).ConfigureAwait(false);
                 Post(() =>
                 {
-                    if (loadedRef != reference || loadedOptions != wanted)
+                    if (generation != transcriptGeneration || Selected?.Session.Ref != reference)
                     {
                         return;
                     }
@@ -760,12 +955,19 @@ public sealed partial class SessionBrowser : IDisposable
             }
             catch (OperationCanceledException)
             {
+                Post(() =>
+                {
+                    if (generation == transcriptGeneration)
+                    {
+                        transcriptLoading = false;
+                    }
+                });
             }
             catch (Exception ex)
             {
                 Post(() =>
                 {
-                    if (loadedRef != reference)
+                    if (generation != transcriptGeneration || Selected?.Session.Ref != reference)
                     {
                         return;
                     }
@@ -774,7 +976,7 @@ public sealed partial class SessionBrowser : IDisposable
                     transcriptError = ex.Message;
                 });
             }
-        }, token);
+        });
 
         Track(task);
     }
@@ -782,7 +984,7 @@ public sealed partial class SessionBrowser : IDisposable
     /// <summary>Appends the next window of turns when the loaded transcript was cut by the character budget.</summary>
     private void LoadMoreTurns()
     {
-        if (transcript is not { IsTruncated: true, NextTurnIndex: { } next } current || transcriptLoadingMore || loadedRef is null || loadedOptions is null)
+        if (transcript is not { IsTruncated: true, NextTurnIndex: { } next } current || transcriptLoadingMore || loadedRef is null || loadedOptions is null || Selected?.Session.Ref != loadedRef)
         {
             return;
         }
@@ -790,6 +992,7 @@ public sealed partial class SessionBrowser : IDisposable
         var reference = loadedRef;
         var wanted = loadedOptions with { FromTurn = next };
         var token = transcriptCancellation?.Token ?? lifetime.Token;
+        var generation = transcriptGeneration;
 
         transcriptLoadingMore = true;
         dirty = true;
@@ -801,9 +1004,15 @@ public sealed partial class SessionBrowser : IDisposable
                 var more = await backend.GetTranscriptAsync(reference, wanted, token).ConfigureAwait(false);
                 Post(() =>
                 {
-                    transcriptLoadingMore = false;
-                    if (loadedRef != reference || transcript != current)
+                    if (generation != transcriptGeneration || Selected?.Session.Ref != reference || transcript != current)
                     {
+                        return;
+                    }
+
+                    transcriptLoadingMore = false;
+                    if (more.IsTruncated && (more.NextTurnIndex is null || more.NextTurnIndex <= next))
+                    {
+                        SetStatus("The provider returned a page without advancing its cursor.", StatusKind.Error);
                         return;
                     }
 
@@ -820,17 +1029,28 @@ public sealed partial class SessionBrowser : IDisposable
             }
             catch (OperationCanceledException)
             {
-                Post(() => transcriptLoadingMore = false);
+                Post(() =>
+                {
+                    if (generation == transcriptGeneration)
+                    {
+                        transcriptLoadingMore = false;
+                    }
+                });
             }
             catch (Exception ex)
             {
                 Post(() =>
                 {
+                    if (generation != transcriptGeneration)
+                    {
+                        return;
+                    }
+
                     transcriptLoadingMore = false;
                     SetStatus(ex.Message, StatusKind.Error);
                 });
             }
-        }, token);
+        });
 
         Track(task);
     }
@@ -844,9 +1064,19 @@ public sealed partial class SessionBrowser : IDisposable
 
         if (formattedWidth != width)
         {
-            formatted = TranscriptFormatter.Format(
-                transcript,
-                new TranscriptFormatOptions(width, showToolOutput, showReasoning, TranscriptFormatter.TermsOf(lastExecutedQuery)));
+            if (formattedWidth < 0)
+            {
+                formattedWidths.Clear();
+            }
+
+            if (!formattedWidths.TryGetValue(width, out formatted!))
+            {
+                formatted = TranscriptFormatter.Format(
+                    transcript,
+                    new TranscriptFormatOptions(width, showToolOutput, showReasoning, highlightTerms, RichText: richPreview));
+                formattedWidths[width] = formatted;
+            }
+
             formattedWidth = width;
         }
 

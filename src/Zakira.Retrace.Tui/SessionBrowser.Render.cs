@@ -9,20 +9,22 @@ public sealed partial class SessionBrowser
 {
     private static readonly string[] SpinnerFrames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
 
-    private readonly record struct Layout(Rect Search, Rect List, Rect Preview, int StatusRow, bool ShowPreview);
+    private readonly record struct Layout(Rect Search, Rect Filters, Rect List, Rect Preview, int StatusRow, bool ShowPreview);
 
     private Layout ComputeLayout()
     {
         var width = buffer.Width;
         var height = buffer.Height;
         var search = new Rect(0, 0, width, 3);
-        var bodyTop = 3;
+        var filterHeight = Math.Min(FilterSummaryLines().Count, Math.Max(1, height - 7));
+        var bodyTop = 3 + filterHeight;
         var bodyHeight = Math.Max(3, height - bodyTop - 1);
         var showPreview = width >= 100;
         var listWidth = showPreview ? Math.Clamp((int)(width * 0.44), 44, 96) : width;
 
         return new Layout(
             search,
+            new Rect(0, 3, width, filterHeight),
             new Rect(0, bodyTop, listWidth, bodyHeight),
             showPreview ? new Rect(listWidth, bodyTop, width - listWidth, bodyHeight) : new Rect(0, 0, 0, 0),
             height - 1,
@@ -45,17 +47,24 @@ public sealed partial class SessionBrowser
 
     private void EnsureSelectionVisible()
     {
-        var page = ListPageSize();
-        if (selected < listScroll)
+        if (selected >= rowOffsets.Length)
         {
-            listScroll = selected;
-        }
-        else if (selected >= listScroll + page)
-        {
-            listScroll = selected - page + 1;
+            listScroll = 0;
+            return;
         }
 
-        listScroll = Math.Clamp(listScroll, 0, Math.Max(0, rows.Count - 1));
+        var page = Math.Max(1, ComputeLayout().List.Inset().Height);
+        var offset = rowOffsets[selected];
+        if (offset < listScroll)
+        {
+            listScroll = Math.Max(0, offset - (offset > 0 && listLines[offset - 1].Heading is not null ? 1 : 0));
+        }
+        else if (offset + 1 >= listScroll + page)
+        {
+            listScroll = Math.Max(0, offset + 2 - page);
+        }
+
+        listScroll = Math.Clamp(listScroll, 0, Math.Max(0, listLines.Count - page));
     }
 
     private string Spinner => SpinnerFrames[(int)(clock.ElapsedMilliseconds / SpinnerIntervalMilliseconds % SpinnerFrames.Length)];
@@ -94,6 +103,10 @@ public sealed partial class SessionBrowser
             case Mode.Input when input is not null:
                 DrawInput(input);
                 break;
+
+            case Mode.Filters:
+                DrawFilters();
+                break;
         }
     }
 
@@ -103,6 +116,12 @@ public sealed partial class SessionBrowser
     {
         var layout = ComputeLayout();
         DrawSearchBox(layout.Search);
+        var filterLines = FilterSummaryLines();
+        for (var index = 0; index < layout.Filters.Height && index < filterLines.Count; index++)
+        {
+            buffer.WriteIn(layout.Filters, index, 1, filterLines[index], Theme.Secondary);
+        }
+
         DrawList(layout.List, focused: !searchFocused && focus == Pane.List);
 
         if (layout.ShowPreview)
@@ -139,7 +158,7 @@ public sealed partial class SessionBrowser
         else if (query.Length == 0)
         {
             buffer.Write(inner.Top, inner.Left + column, " ", Theme.Caret, 1);
-            buffer.WriteIn(inner, 0, column + 2, "search across every harness", Theme.Placeholder);
+            buffer.WriteIn(inner, 0, column + 2, "search · provider:opencode since:7d · F2 providers / F3 filters", Theme.Placeholder);
         }
         else
         {
@@ -260,56 +279,53 @@ public sealed partial class SessionBrowser
             return;
         }
 
-        var page = Math.Max(1, inner.Height / 2);
+        var page = inner.Height;
         EnsureSelectionVisible();
         var now = DateTimeOffset.UtcNow;
-        var hasScrollbar = count > page;
+        var hasScrollbar = listLines.Count > page;
         var contentWidth = inner.Width - (hasScrollbar ? 1 : 0);
         var content = new Rect(inner.Left, inner.Top, contentWidth, inner.Height);
-        var stale = queryLoading && !string.Equals(query.Trim(), lastExecutedQuery, StringComparison.Ordinal);
+        var stale = appliedQueryRevision != queryRevision;
 
         for (var slot = 0; slot < page; slot++)
         {
             var index = listScroll + slot;
-            if (index >= count)
+            if (index >= listLines.Count)
             {
                 break;
             }
 
-            var row = rows[index];
-            var isSelected = index == selected;
-            var top = slot * 2;
+            var display = listLines[index];
+            if (display.Heading is { } heading)
+            {
+                buffer.WriteIn(content, slot, 1, TextWidth.Clip("─ " + heading, content.Width - 2), Theme.PaneTitle);
+                continue;
+            }
 
-            DrawListRow(content, top, row, now, isSelected);
+            var row = rows[display.RowIndex];
+            var isSelected = display.RowIndex == selected;
+            if (!display.Detail || slot == 0)
+            {
+                DrawListRow(content, display.Detail ? -1 : slot, row, now, isSelected);
+            }
 
             if (isSelected)
             {
                 var background = focused ? Theme.Selection : Theme.SelectionInactive;
-                for (var line = 0; line < 2 && top + line < content.Height; line++)
-                {
-                    buffer.RestyleRow(content, top + line, style => OnSelection(style, background));
-                }
-
-                buffer.WriteIn(content, top, 0, "\u258e", Theme.SelectionBar.WithBg(background));
-                if (top + 1 < content.Height)
-                {
-                    buffer.WriteIn(content, top + 1, 0, "\u258e", Theme.SelectionBar.WithBg(background));
-                }
+                buffer.RestyleRow(content, slot, style => OnSelection(style, background));
+                buffer.WriteIn(content, slot, 0, "\u258e", Theme.SelectionBar.WithBg(background));
             }
             else if (stale)
             {
                 // Results for a query the user has already typed past: still useful to look at,
                 // visibly not the answer yet.
-                for (var line = 0; line < 2 && top + line < content.Height; line++)
-                {
-                    buffer.RestyleRow(content, top + line, style => style.Background == Theme.Amber ? style : style.Dim());
-                }
+                buffer.RestyleRow(content, slot, style => style.Background == Theme.Amber ? style : style.Dim());
             }
         }
 
         if (hasScrollbar)
         {
-            buffer.DrawScrollbar(new Rect(inner.Right - 1, inner.Top, 1, inner.Height), count, page, listScroll, Theme.ScrollTrack, Theme.ScrollThumb);
+            buffer.DrawScrollbar(new Rect(inner.Right - 1, inner.Top, 1, inner.Height), listLines.Count, page, listScroll, Theme.ScrollTrack, Theme.ScrollThumb);
         }
     }
 
@@ -326,7 +342,20 @@ public sealed partial class SessionBrowser
             return;
         }
 
-        if (query.Trim().Length > 0)
+        if (EffectiveProviders.Count == 0)
+        {
+            var message = backend.SourceIds.Count == 0
+                ? "No enabled providers. Run `retrace sources enable <provider>`."
+                : "No providers selected. F2 selects providers.";
+            foreach (var line in TextWidth.Wrap(message, Math.Max(1, inner.Width - 2)))
+            {
+                buffer.WriteIn(inner, centre++, 1, line, Theme.Secondary);
+            }
+
+            return;
+        }
+
+        if (parsedQuery.Text.Length > 0)
         {
             var headline = TextWidth.Clip($"No matches for \u201c{query.Trim()}\u201d", inner.Width - 4);
             buffer.WriteIn(inner, centre, Math.Max(1, (inner.Width - TextWidth.Of(headline)) / 2), headline, Theme.Secondary);
@@ -342,7 +371,7 @@ public sealed partial class SessionBrowser
             return;
         }
 
-        var empty = sourceFilter is not null || here ? "No sessions match the current filters." : "No sessions yet.";
+        var empty = "No sessions match. F3 adjusts filters; 0 resets them.";
         buffer.WriteIn(inner, centre, Math.Max(1, (inner.Width - TextWidth.Of(empty)) / 2), empty, Theme.Secondary);
     }
 
@@ -381,7 +410,7 @@ public sealed partial class SessionBrowser
         }
 
         var titleWidth = Math.Max(0, content.Width - column - 1);
-        var terms = TranscriptFormatter.TermsOf(lastExecutedQuery);
+        var terms = highlightTerms;
         var titleStyle = isSelected ? Theme.RowTitle.Bold() : Theme.RowTitle;
         var (titleSpans, _) = TranscriptFormatter.Highlight(TextWidth.Clip(title, titleWidth), titleStyle, terms);
         buffer.WriteSpans(content, top, column, titleSpans);
@@ -415,7 +444,11 @@ public sealed partial class SessionBrowser
     private void DrawPreview(Rect rect, bool focused)
     {
         var row = Selected;
-        var title = new List<StyledSpan> { new("Preview", focused ? Theme.PaneTitleFocused : Theme.PaneTitle) };
+        var title = new List<StyledSpan>
+        {
+            new("Preview", focused ? Theme.PaneTitleFocused : Theme.PaneTitle),
+            new(richPreview ? " · rich" : " · literal", Theme.PaneCount)
+        };
         var rightTitle = row is null ? [] : new List<StyledSpan> { new(row.Session.Ref.ShortForm, Theme.PaneCount) };
 
         buffer.DrawBox(rect, focused ? Theme.BorderFocused : Theme.Border, title, rightTitle);
@@ -454,8 +487,15 @@ public sealed partial class SessionBrowser
     /// <summary>Snippets first, so the matched passage is the first thing visible, then the transcript.</summary>
     private List<TranscriptLine> BuildPreviewLines(Row row, int width)
     {
+        var key = new PreviewKey(row, transcript, width, showToolOutput, showReasoning, richPreview, highlightTerms);
+        var stable = !transcriptLoading && transcriptError is null && loadedRef == row.Session.Ref;
+        if (stable && key == previewKey)
+        {
+            return previewLines;
+        }
+
         var lines = new List<TranscriptLine>();
-        var terms = TranscriptFormatter.TermsOf(lastExecutedQuery);
+        var terms = highlightTerms;
 
         if (row.Hit is { Snippets.Count: > 0 } hit)
         {
@@ -467,14 +507,25 @@ public sealed partial class SessionBrowser
 
             foreach (var snippet in hit.Snippets)
             {
-                var text = TextUtilities.Flatten(snippet.Highlighted ?? snippet.Text)
+                var text = (snippet.Highlighted ?? snippet.Text)
                     .Replace("<<", string.Empty, StringComparison.Ordinal)
                     .Replace(">>", string.Empty, StringComparison.Ordinal);
                 var label = $"{TextUtilities.RoleLabel(snippet.Role)} #{snippet.TurnIndex}  ";
                 var first = true;
-                foreach (var wrapped in TextWidth.Wrap(text, Math.Max(8, width - label.Length)))
+                var snippetWidth = Math.Max(4, width - label.Length);
+                var snippetLines = richPreview
+                    ? MarkdownFormatter.Format(text, snippetWidth, Theme.Snippet, terms)
+                    : TextWidth.Wrap(TextUtilities.Flatten(text), snippetWidth).Select(line => TranscriptFormatter.Highlight(line, Theme.Snippet, terms).Spans);
+                var count = 0;
+                foreach (var spans in snippetLines)
                 {
-                    var (spans, matched) = TranscriptFormatter.Highlight(wrapped, Theme.Snippet, terms);
+                    if (count++ == 6)
+                    {
+                        lines.Add(new TranscriptLine([new StyledSpan("… more in the transcript", Theme.Dim)], snippet.TurnIndex, false, false));
+                        break;
+                    }
+
+                    var matched = spans.Any(span => span.Style.Background == Theme.Match.Background);
                     var all = new List<StyledSpan> { new(first ? label : new string(' ', label.Length), Theme.SnippetRole) };
                     all.AddRange(spans);
                     lines.Add(new TranscriptLine(all, snippet.TurnIndex, false, matched));
@@ -485,7 +536,7 @@ public sealed partial class SessionBrowser
             lines.Add(new TranscriptLine([new StyledSpan(new string('\u2500', Math.Max(1, width)), Theme.Border)], -1, false, false));
         }
 
-        if (transcriptLoading)
+        if (transcriptLoading || loadedRef != row.Session.Ref)
         {
             lines.Add(new TranscriptLine([new StyledSpan(Spinner, Theme.Spinner), new StyledSpan(" loading transcript\u2026", Theme.Dim)], -1, false, false));
         }
@@ -501,6 +552,12 @@ public sealed partial class SessionBrowser
             lines.AddRange(FormattedLines(width));
         }
 
+        if (stable)
+        {
+            previewKey = key;
+            previewLines = lines;
+        }
+
         return lines;
     }
 
@@ -511,7 +568,7 @@ public sealed partial class SessionBrowser
         var row = Selected;
         var rect = new Rect(0, 0, buffer.Width, buffer.Height - 1);
         var inner = rect.Inset();
-        var lines = row is null || transcriptLoading || transcriptError is not null ? [] : FormattedLines(Math.Max(10, inner.Width - 3));
+        var lines = row is null || transcriptLoading || transcriptError is not null || loadedRef != row.Session.Ref ? [] : FormattedLines(Math.Max(1, inner.Width - 3));
         var total = lines.Count;
         readerScroll = Math.Clamp(readerScroll, 0, Math.Max(0, total - inner.Height));
 
@@ -540,7 +597,7 @@ public sealed partial class SessionBrowser
             return;
         }
 
-        if (transcriptLoading)
+        if (transcriptLoading || loadedRef != row.Session.Ref)
         {
             buffer.WriteSpans(inner, 1, 2, [new StyledSpan(Spinner, Theme.Spinner), new StyledSpan(" loading transcript\u2026", Theme.Dim)]);
             return;
@@ -641,10 +698,10 @@ public sealed partial class SessionBrowser
                     break;
             }
         }
-        else if (activity is not null)
+        else if (activity is not null || warming)
         {
             left.Add(new StyledSpan(Spinner, Theme.Spinner));
-            left.Add(new StyledSpan(" " + TextWidth.Clip(activity, leftBudget - 2), Theme.Dim));
+            left.Add(new StyledSpan(" " + TextWidth.Clip(activity ?? "warming up semantic search", leftBudget - 2), Theme.Dim));
         }
         else
         {
@@ -660,11 +717,6 @@ public sealed partial class SessionBrowser
         {
             left.Add(new StyledSpan("  ", Style.Plain));
             left.Add(new StyledSpan($" {text} ", style));
-        }
-
-        if (sourceFilter is not null)
-        {
-            Chip($"source {sourceFilter}", Theme.ChipAccent);
         }
 
         if (here)
@@ -700,22 +752,24 @@ public sealed partial class SessionBrowser
         {
             Mode.Reader =>
             [
-                ("j/k", "scroll"), ("n/N", "match"), ("]/[", "turn"), ("x", "tools"), ("z", "reasoning"),
-                ("r", "resume"), ("c", "copy cmd"), ("q", "back"), ("?", "help")
+                ("q", "back"), ("j/k", "scroll"), ("n/N", "match"), ("]/[", "turn"), ("v", "rich/text"), ("x", "tools"), ("z", "reasoning"),
+                ("r", "resume"), ("c", "copy cmd"), ("?", "help")
             ],
             Mode.Confirm => [("\u23ce", confirm?.AcceptLabel ?? "ok"), ("c", "copy"), ("esc", "cancel")],
             Mode.Input => [("\u23ce", "apply"), ("esc", "cancel")],
-            Mode.Help or Mode.Info => [("esc", "close")],
+            Mode.Filters => [("space", "toggle"), ("←→", "change"), ("esc", "close")],
+            Mode.Help => [("j/k", "scroll"), ("pgdn", "page"), ("esc", "close")],
+            Mode.Info => [("esc", "close")],
             _ when searchFocused =>
             [
                 ("\u2191\u2193", "select"), ("\u23ce", options.Pick == PickKind.None ? "open" : "pick"),
-                ("esc", "to list"), ("ctrl+u", "clear"), ("?", "help")
+                ("F2", "providers"), ("F3", "filters"), ("esc", "to list"), ("F1", "help")
             ],
             _ when focus == Pane.Preview => [("j/k", "scroll"), ("tab", "to list"), ("\u23ce", "reader"), ("?", "help")],
             _ =>
             [
-                ("j/k", "move"), ("\u23ce", options.Pick == PickKind.None ? "open" : "pick"), ("/", "search"), ("r", "resume"),
-                ("c", "copy cmd"), ("y", "uri"), ("d", "dir"), ("o", "folder"), ("t", "tag"), ("s", "source"), ("?", "help"), ("q", "quit")
+                ("j/k", "move"), ("\u23ce", options.Pick == PickKind.None ? "open" : "pick"), ("?", "help"), ("q", "quit"), ("/", "search"),
+                ("p", "providers"), ("f", "filters"), ("r", "resume")
             ]
         };
 
@@ -723,7 +777,7 @@ public sealed partial class SessionBrowser
         var used = 0;
 
         // Hints get at most three fifths of the bar; the rest belongs to counts, filters, and messages.
-        var budget = Math.Max(10, width * 3 / 5);
+        var budget = Math.Max(10, width < 60 ? width - 2 : width * 3 / 5);
 
         foreach (var (key, label) in pairs)
         {
@@ -802,33 +856,60 @@ public sealed partial class SessionBrowser
             ("e", "export the transcript as Markdown into the current directory"),
             ("t", "add tags; prefix with - to remove"),
             ("i", "session details"),
-            ("s w a", "cycle source filter / toggle here / toggle archived"),
+            ("F2 p", "select multiple providers (space toggles, a all, n none)"),
+            ("F3 f", "time window, result order, grouping, and filters"),
+            ("O b 0", "cycle order / cycle grouping / reset all filters"),
+            ("s w a", "cycle one provider / toggle here / toggle archived"),
             ("m", "cycle search mode: hybrid, keyword, semantic"),
-            ("x z", "show or hide tool output / reasoning"),
+            ("x z v", "toggle tools & diffs / reasoning / rich or literal preview"),
             ("ctrl+r", "refresh the index (keyword-only) and re-run the query"),
             ("n N ] [", "reader: next / previous match, next / previous turn")
         ];
 
-        var keyWidth = Math.Max(navigation.Max(item => item.Key.Length), actions.Max(item => item.Key.Length)) + 3;
-        var card = CenteredCard(96, navigation.Length + actions.Length + 8);
-        DrawCard(card, "Keys", [new StyledSpan("esc closes", Theme.OverlayMuted)]);
+        (string Key, string Text)[] syntax =
+        [
+            ("provider:", "opencode, copilot-cli, copilot-vscode; copilot means both"),
+            ("-provider:", "exclude a provider; source: is an alias for provider:"),
+            ("since: until:", "inclusive dates (2026-10-31) or durations (7d, 12h)"),
+            ("last:", "day, week, month, year; rolling windows from now"),
+            ("sort:", "relevance, newest, oldest, provider, title, size"),
+            ("group:", "none, provider, day, week, month (local update date)"),
+            ("repo: tag:", "also agent: and model:; quote values containing spaces"),
+            ("\"...\"", "quoted phrases stay literal, even \"provider:opencode\""),
+            ("results", "order/group the returned matches; dates filter the whole index"),
+            ("indexing", "retrace sources disable copilot --index-only")
+        ];
+
+        var entries = new List<(string Key, string Text)> { (string.Empty, "Navigation") };
+        entries.AddRange(navigation);
+        entries.Add((string.Empty, "Actions & controls"));
+        entries.AddRange(actions);
+        entries.Add((string.Empty, "Search syntax (combine with ordinary search text)"));
+        entries.AddRange(syntax);
+        var keyWidth = entries.Max(item => item.Key.Length) + 3;
+        var card = CenteredCard(104, entries.Count + 4);
+        DrawCard(card, "Keys & search syntax", [new StyledSpan("j/k scroll · esc closes", Theme.OverlayMuted)]);
 
         var inner = card.Inset();
-        var row = 1;
-        buffer.WriteIn(inner, row++, 2, "Navigation", Theme.OverlaySection);
-        foreach (var (key, text) in navigation)
+        var page = Math.Max(1, inner.Height - 1);
+        helpScroll = Math.Clamp(helpScroll, 0, Math.Max(0, entries.Count - page));
+        for (var slot = 0; slot < page && helpScroll + slot < entries.Count; slot++)
         {
-            WriteKeyCap(inner, row, 2, key, keyWidth);
-            buffer.WriteIn(inner, row++, 2 + keyWidth + 1, text, Theme.Overlay);
+            var (key, text) = entries[helpScroll + slot];
+            if (key.Length == 0)
+            {
+                buffer.WriteIn(inner, slot, 2, text, Theme.OverlaySection);
+            }
+            else
+            {
+                WriteKeyCap(inner, slot, 2, key, keyWidth);
+                buffer.WriteIn(inner, slot, 2 + keyWidth + 1, text, Theme.Overlay);
+            }
+
         }
 
-        row++;
-        buffer.WriteIn(inner, row++, 2, "Actions", Theme.OverlaySection);
-        foreach (var (key, text) in actions)
-        {
-            WriteKeyCap(inner, row, 2, key, keyWidth);
-            buffer.WriteIn(inner, row++, 2 + keyWidth + 1, text, Theme.Overlay);
-        }
+        buffer.DrawScrollbar(new Rect(inner.Right - 1, inner.Top, 1, page), entries.Count, page, helpScroll, Theme.ScrollTrack, Theme.ScrollThumb);
+        buffer.WriteIn(inner, inner.Height - 1, 2, "↑↓ / j k scroll · PgUp/PgDn page · Home/End · Esc close", Theme.OverlayMuted);
     }
 
     private void DrawInfo()

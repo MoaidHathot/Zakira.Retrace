@@ -1,5 +1,6 @@
 using Zakira.Retrace.Abstractions;
 using Zakira.Retrace.Core.Index;
+using Zakira.Retrace.Core.Text;
 
 namespace Zakira.Retrace.Tui.UnitTests;
 
@@ -9,6 +10,16 @@ internal sealed class FakeBackend : IBrowserBackend
     public List<SessionTranscript> Transcripts { get; } = [];
 
     public List<string> SearchQueries { get; } = [];
+
+    public List<SearchQuery> SearchRequests { get; } = [];
+
+    public List<SessionFilter> ListRequests { get; } = [];
+
+    public TaskCompletionSource<SearchQuery> SearchStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Func<SearchQuery, CancellationToken, Task<IReadOnlyList<SearchHit>>>? SearchHandler { get; set; }
+
+    public Func<SessionRef, TranscriptOptions, CancellationToken, Task<SessionTranscript>>? TranscriptHandler { get; set; }
 
     public List<(SessionRef Session, string[] Add, string[] Remove)> TagChanges { get; } = [];
 
@@ -69,14 +80,21 @@ internal sealed class FakeBackend : IBrowserBackend
 
     public async Task<IReadOnlyList<SessionSummary>> ListAsync(SessionFilter filter, CancellationToken cancellationToken)
     {
+        ListRequests.Add(filter);
         await Task.Delay(Delay, cancellationToken);
 
-        return [.. Transcripts
+        var sessions = Transcripts
             .Select(Decorate)
-            .Where(summary => filter.SourceIds.Count == 0 || filter.SourceIds.Contains(summary.Ref.SourceId, StringComparer.OrdinalIgnoreCase))
-            .Where(summary => filter.WorkspacePath is null || string.Equals(summary.Workspace?.Path, filter.WorkspacePath, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(summary => summary.UpdatedAt)
-            .Take(filter.Limit > 0 ? filter.Limit : int.MaxValue)];
+            .Where(summary => Matches(summary, filter));
+        var ordered = filter.Sort switch
+        {
+            SessionSortOrder.Oldest => sessions.OrderBy(summary => summary.UpdatedAt),
+            SessionSortOrder.Provider => sessions.OrderBy(summary => summary.Ref.SourceId, StringComparer.Ordinal),
+            SessionSortOrder.Title => sessions.OrderBy(summary => summary.Title, StringComparer.Ordinal),
+            SessionSortOrder.Size => sessions.OrderByDescending(summary => summary.Stats.MessageCount),
+            _ => sessions.OrderByDescending(summary => summary.UpdatedAt)
+        };
+        return [.. ordered.Take(filter.Limit > 0 ? filter.Limit : int.MaxValue)];
     }
 
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, CancellationToken cancellationToken)
@@ -85,8 +103,15 @@ internal sealed class FakeBackend : IBrowserBackend
         MaxConcurrentSearches = Math.Max(MaxConcurrentSearches, running);
         try
         {
-            await Task.Delay(Delay, cancellationToken);
             SearchQueries.Add(query.Text);
+            SearchRequests.Add(query);
+            SearchStarted.TrySetResult(query);
+            if (SearchHandler is not null)
+            {
+                return await SearchHandler(query, cancellationToken);
+            }
+
+            await Task.Delay(Delay, cancellationToken);
 
             if (ThrowIndexNotBuilt)
             {
@@ -96,7 +121,7 @@ internal sealed class FakeBackend : IBrowserBackend
             var hits = new List<SearchHit>();
             foreach (var transcript in Transcripts)
             {
-                if (query.Filter.SourceIds.Count > 0 && !query.Filter.SourceIds.Contains(transcript.Summary.Ref.SourceId, StringComparer.OrdinalIgnoreCase))
+                if (!Matches(Decorate(transcript), query.Filter))
                 {
                     continue;
                 }
@@ -112,7 +137,7 @@ internal sealed class FakeBackend : IBrowserBackend
                 }
             }
 
-            return [.. hits.OrderByDescending(hit => hit.Score)];
+            return [.. hits.OrderByDescending(hit => hit.Score).Take(query.Top)];
         }
         finally
         {
@@ -126,6 +151,11 @@ internal sealed class FakeBackend : IBrowserBackend
 
     public async Task<SessionTranscript> GetTranscriptAsync(SessionRef session, TranscriptOptions options, CancellationToken cancellationToken)
     {
+        if (TranscriptHandler is not null)
+        {
+            return await TranscriptHandler(session, options, cancellationToken);
+        }
+
         await Task.Delay(Delay, cancellationToken);
         var transcript = Transcripts.First(item => item.Summary.Ref == session);
 
@@ -211,4 +241,15 @@ internal sealed class FakeBackend : IBrowserBackend
         Tags.TryGetValue(transcript.Summary.Ref.Uri, out var tags)
             ? transcript.Summary with { Tags = [.. tags] }
             : transcript.Summary;
+
+    private static bool Matches(SessionSummary session, SessionFilter filter) =>
+        (filter.SourceIds.Count == 0 || filter.SourceIds.Contains(session.Ref.SourceId, StringComparer.OrdinalIgnoreCase))
+        && (filter.WorkspacePath is null || TextUtilities.IsUnder(session.Workspace?.Path, filter.WorkspacePath))
+        && (filter.Since is null || session.UpdatedAt >= filter.Since)
+        && (filter.Until is null || session.UpdatedAt <= filter.Until)
+        && (filter.IncludeArchived || !session.IsArchived)
+        && (filter.Repository is null || (session.Workspace?.Repository ?? session.Workspace?.Path ?? string.Empty).Contains(filter.Repository, StringComparison.OrdinalIgnoreCase))
+        && (filter.Agent is null || (session.Agent ?? string.Empty).Contains(filter.Agent, StringComparison.OrdinalIgnoreCase))
+        && (filter.Model is null || session.Models.Any(model => model.Contains(filter.Model, StringComparison.OrdinalIgnoreCase)))
+        && filter.Tags.All(tag => session.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase));
 }

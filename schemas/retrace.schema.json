@@ -253,8 +253,10 @@
         },
         "showToolOutput": { "type": "boolean", "default": false, "description": "Show captured tool output in the reader. Toggle at runtime with x." },
         "showReasoning": { "type": "boolean", "default": false, "description": "Show model reasoning in the reader. Toggle at runtime with z." },
+        "richPreview": { "type": "boolean", "default": true, "description": "Render Markdown, code syntax accents, tables, and diffs in the preview and reader. Toggle with v for literal text." },
         "listLimit": { "type": "integer", "minimum": 1, "default": 200, "description": "Sessions fetched for the browse list when no query is typed." },
-        "searchLimit": { "type": "integer", "minimum": 1, "default": 50, "description": "Results fetched per search." }
+        "searchLimit": { "type": "integer", "minimum": 1, "default": 50, "description": "Results fetched per search." },
+        "searchDebounceMilliseconds": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 120, "description": "Idle time before a typed query runs. 0 searches immediately; larger values reduce work while typing." }
       }
     }
   }

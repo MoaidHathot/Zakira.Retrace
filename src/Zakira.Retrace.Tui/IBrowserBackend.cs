@@ -20,7 +20,7 @@ public sealed record IndexInfo(bool Exists, int SessionCount, string? EmbeddingM
 /// </remarks>
 public interface IBrowserBackend
 {
-    /// <summary>Source ids the user can cycle through as a filter, enabled ones only.</summary>
+    /// <summary>Provider ids available for search selection, enabled ones only.</summary>
     IReadOnlyList<string> SourceIds { get; }
 
     /// <summary>Whether an index exists, which decides whether search is possible at all.</summary>
@@ -29,7 +29,7 @@ public interface IBrowserBackend
     /// <summary>Sources the last automatic top-up could not bring fully current.</summary>
     IReadOnlyList<string> PendingSources { get; }
 
-    /// <summary>Lists sessions, newest first, from the index as it stands.</summary>
+    /// <summary>Lists matching sessions in the requested order, from the index as it stands.</summary>
     Task<IReadOnlyList<SessionSummary>> ListAsync(SessionFilter filter, CancellationToken cancellationToken);
 
     /// <summary>Runs a ranked search against the index as it stands.</summary>

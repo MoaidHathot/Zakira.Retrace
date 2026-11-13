@@ -63,8 +63,11 @@ public sealed record SourceIndexResult
 /// <summary>Options for a build or refresh.</summary>
 public sealed record IndexBuildOptions
 {
-    /// <summary>Restrict to these sources. Empty means every enabled source.</summary>
+    /// <summary>Restrict to these sources. Empty uses each enabled source's default-indexing policy.</summary>
     public IReadOnlyList<string> SourceIds { get; init; } = [];
+
+    /// <summary>Providers to skip for this build, even when explicitly included.</summary>
+    public IReadOnlyList<string> ExcludedSourceIds { get; init; } = [];
 
     /// <summary>
     /// Ignore watermarks and content hashes and re-read everything. Needed after a chunking or
@@ -159,10 +162,11 @@ public sealed class IndexBuilder(
     public async Task<IndexBuildResult> BuildAsync(IndexBuildOptions options, CancellationToken cancellationToken)
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
+        var selection = SelectSources(options).ToArray();
 
         await using var connection = await RetraceIndexSchema.OpenAsync(IndexPath, cancellationToken).ConfigureAwait(false);
 
-        using var embedder = options.Embed && config.Embeddings.Enabled
+        using var embedder = options.Embed && config.Embeddings.Enabled && selection.Any(item => item.SkipReason is null)
             ? await embeddingFactory.CreateAsync(cancellationToken).ConfigureAwait(false)
             : null;
 
@@ -172,7 +176,7 @@ public sealed class IndexBuilder(
 
         try
         {
-            foreach (var (source, skipReason) in SelectSources(options))
+            foreach (var (source, skipReason) in selection)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -227,11 +231,19 @@ public sealed class IndexBuilder(
     private IEnumerable<(ISessionSource Source, string? SkipReason)> SelectSources(IndexBuildOptions options)
     {
         var explicitlyNamed = options.SourceIds.Count > 0;
+        var included = SourceSelection.Resolve(options.SourceIds, sources.Select(source => source.Id));
+        var excluded = SourceSelection.Resolve(options.ExcludedSourceIds, sources.Select(source => source.Id));
 
         foreach (var source in sources)
         {
-            if (explicitlyNamed && !options.SourceIds.Contains(source.Id, StringComparer.OrdinalIgnoreCase))
+            if (explicitlyNamed && !included.Contains(source.Id, StringComparer.OrdinalIgnoreCase))
             {
+                continue;
+            }
+
+            if (excluded.Contains(source.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                yield return (source, "excluded for this build (--exclude-source)");
                 continue;
             }
 
@@ -319,6 +331,7 @@ public sealed class IndexBuilder(
         var skipped = 0;
         var chunks = 0;
         var vectors = 0;
+        var complete = true;
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         // The scoping bounds are pushed into the filter on the non-incremental path so they become
@@ -369,15 +382,17 @@ public sealed class IndexBuilder(
             {
                 transcript = await source.GetAsync(summary.Ref.NativeId, transcriptOptions, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // One unreadable session must not abort a build over thousands of others.
-                logger.LogDebug(ex, "Skipped session {Uri} while indexing.", summary.Ref.Uri);
+                complete = false;
+                logger.LogWarning("Skipped session {Uri} while indexing: {Message}. Its source watermark will not advance.", summary.Ref.Uri, ex.Message);
                 continue;
             }
 
             if (transcript is null)
             {
+                complete = false;
                 continue;
             }
 
@@ -403,7 +418,7 @@ public sealed class IndexBuilder(
         // conclude that everything older had already been handled, and the excluded sessions would
         // never be backfilled. Preserving the previous watermark costs one cheap re-enumeration
         // later, which the content-hash check absorbs without reading a transcript.
-        var watermarkToRecord = options.IsScoped ? storedWatermark : newWatermark;
+        var watermarkToRecord = options.IsScoped || !complete ? storedWatermark : newWatermark;
         await WriteSourceStateAsync(connection, source.Id, watermarkToRecord, cancellationToken).ConfigureAwait(false);
 
         options.Progress?.Report(new IndexProgress(source.Id, indexed, availability.SessionCount, "done"));

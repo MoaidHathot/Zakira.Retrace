@@ -86,7 +86,7 @@ public sealed class SessionCatalog(
                     ? await source.ProbeAsync(cancellationToken).ConfigureAwait(false)
                     : SourceAvailability.Unavailable("Disabled in configuration.");
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 availability = SourceAvailability.Unavailable(ex.Message);
             }
@@ -169,6 +169,8 @@ public sealed class SessionCatalog(
                     return transcript.Summary;
                 }
             }
+
+            throw new SessionNotFoundException(identifier);
         }
 
         foreach (var source in Sources)
@@ -190,7 +192,12 @@ public sealed class SessionCatalog(
         var source = RequireSource(summary.Ref.SourceId);
 
         var transcript = await source.GetAsync(summary.Ref.NativeId, options, cancellationToken).ConfigureAwait(false);
-        return transcript ?? throw new SessionNotFoundException(identifier);
+        if (transcript is null)
+        {
+            throw new SessionNotFoundException(identifier);
+        }
+
+        return transcript with { Summary = transcript.Summary with { Tags = [.. transcript.Summary.Tags.Union(summary.Tags, StringComparer.OrdinalIgnoreCase)] } };
     }
 
     /// <summary>Builds the resume command for a session.</summary>
@@ -225,8 +232,16 @@ public sealed class SessionCatalog(
     public Task<IndexStatus> GetIndexStatusAsync(CancellationToken cancellationToken) => searcher.GetStatusAsync(cancellationToken);
 
     /// <summary>Builds or refreshes the index.</summary>
-    public Task<IndexBuildResult> RefreshIndexAsync(IndexBuildOptions options, CancellationToken cancellationToken) =>
-        builder.BuildAsync(options, cancellationToken);
+    public async Task<IndexBuildResult> RefreshIndexAsync(IndexBuildOptions options, CancellationToken cancellationToken)
+    {
+        var result = await builder.BuildAsync(options, cancellationToken).ConfigureAwait(false);
+        if (PendingSources.Count > 0)
+        {
+            PendingSources = await FindStaleSourcesAsync(PendingSources, cancellationToken).ConfigureAwait(false);
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// Tops the index up when a source's watermark has moved, under a strict time budget.
@@ -272,7 +287,7 @@ public sealed class SessionCatalog(
             return false;
         }
 
-        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var status = await searcher.GetStatusAsync(cancellationToken, includeVectorCoverage: false).ConfigureAwait(false);
         var stale = new List<string>();
 
         // Only sources indexed by default are considered. A source the user took out of the
@@ -295,7 +310,7 @@ public sealed class SessionCatalog(
                     stale.Add(source.Id);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogDebug(ex, "Could not check freshness for source {SourceId}.", source.Id);
             }
@@ -353,7 +368,7 @@ public sealed class SessionCatalog(
     /// <summary>Re-probes the given sources and returns those whose watermark still differs.</summary>
     private async Task<IReadOnlyList<string>> FindStaleSourcesAsync(IReadOnlyList<string> candidates, CancellationToken cancellationToken)
     {
-        var status = await searcher.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var status = await searcher.GetStatusAsync(cancellationToken, includeVectorCoverage: false).ConfigureAwait(false);
         var pending = new List<string>();
 
         foreach (var id in candidates)
@@ -374,7 +389,7 @@ public sealed class SessionCatalog(
                     pending.Add(id);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogDebug(ex, "Could not re-check freshness for source {SourceId}.", id);
             }
@@ -387,6 +402,12 @@ public sealed class SessionCatalog(
     {
         var selected = SelectSources(filter.SourceIds);
         var results = new List<SessionSummary>();
+        // Keep the common no-index browse bounded. Sources already support recent/created order;
+        // other orders (or post-read message-count filters) need the full candidate set to avoid
+        // taking a recent page and then calling it the oldest/largest/alphabetical page.
+        var sourceFilter = filter.Sort is SessionSortOrder.Recent or SessionSortOrder.Created && filter.MinMessages is null
+            ? filter
+            : filter with { Limit = 0 };
 
         // Sources are independent and mostly I/O bound, so fanning out is a straight win on a
         // machine with several harnesses installed.
@@ -395,12 +416,12 @@ public sealed class SessionCatalog(
             var items = new List<SessionSummary>();
             try
             {
-                await foreach (var summary in source.ListAsync(filter, cancellationToken).ConfigureAwait(false))
+                await foreach (var summary in source.ListAsync(sourceFilter, cancellationToken).ConfigureAwait(false))
                 {
                     items.Add(summary);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning(ex, "Source {SourceId} failed while listing; its results are omitted.", source.Id);
             }
@@ -417,6 +438,9 @@ public sealed class SessionCatalog(
         {
             SessionSortOrder.Created => results.OrderByDescending(item => item.CreatedAt),
             SessionSortOrder.Size => results.OrderByDescending(item => item.Stats.MessageCount ?? 0),
+            SessionSortOrder.Oldest => results.OrderBy(item => item.UpdatedAt),
+            SessionSortOrder.Provider => results.OrderBy(item => item.Ref.SourceId, StringComparer.OrdinalIgnoreCase).ThenByDescending(item => item.UpdatedAt),
+            SessionSortOrder.Title => results.OrderBy(item => item.Title, StringComparer.OrdinalIgnoreCase),
             _ => results.OrderByDescending(item => item.UpdatedAt)
         };
 
@@ -451,7 +475,7 @@ public sealed class SessionCatalog(
                     hits.Add(hit);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning(ex, "Source {SourceId} failed while searching; its results are omitted.", source.Id);
             }
@@ -492,7 +516,7 @@ public sealed class SessionCatalog(
             {
                 transcript = await source.GetAsync(summary.Ref.NativeId, TranscriptOptions.Default, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 continue;
             }
@@ -563,7 +587,7 @@ public sealed class SessionCatalog(
         {
             return await source.GetAsync(nativeId, options, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
